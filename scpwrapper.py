@@ -53,12 +53,13 @@ def main():
             bastion_port = i.split("=")[1]
 
     # read from configuration file
-    bastion_host, bastion_port, bastion_user = manage_conf_file(
-        os.getenv("BASTION_CONF_FILE", default_configuration_file),
-        bastion_host,
-        bastion_port,
-        bastion_user,
-    )
+    if not bastion_host or not bastion_port or not bastion_user:
+        bastion_host, bastion_port, bastion_user = manage_conf_file(
+            os.getenv("BASTION_CONF_FILE", default_configuration_file),
+            bastion_host,
+            bastion_port,
+            bastion_user,
+        )
 
     # lookup on the inventory may take some time, depending on the source, so use it only if not defined elsewhere
     # it seems like some module like template does not send env vars too...
