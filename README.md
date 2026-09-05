@@ -64,6 +64,16 @@ The wrapper runs once per task and per host, and lists the inventory on each of 
 
 If not set, the cache will not be used, even if `cache` is set at the Ansible level.
 
+A cache file holds the bastion vars alone, keyed by every name Ansible may reach a host under, with their Jinja references already resolved. The groups and the unrelated host variables a listing carries are dropped, as nothing in the wrapper reads them: on an inventory of 3000 groups and 2000 hosts that is 0.6 MB read in 2.7 ms rather than 4.9 MB read in 21 ms, on every run the wrapper makes.
+
+A cache file written by an older version of the wrapper is read as no cache at all, and replaced by a listing.
+
+## Asking for a single host
+
+`ansible-inventory --list` renders the variables of every host and serializes every group with them, and the wrapper runs once per task and per host. Setting `BASTION_ANSIBLE_INV_HOST_LOOKUP` to `1` asks `ansible-inventory --host <host>` for the one host being connected to instead, which skips all of it.
+
+The lookup answers only where Ansible connects to a host under its inventory name. A host reached through its `ansible_host` variable is not found by name, and the wrapper falls back to the listing, so the option costs one extra `ansible-inventory` run per connection on an inventory that sets `ansible_host` everywhere. It is off by default for that reason: turn it on when your inventory names are what Ansible connects to.
+
 ## Using env vars from a playbook
 
 In some cases, like the usage of multiple bastions for a single ansible controller and multiple inventory sources, it may be useful to set the vars in the environment configuration from the playbook.

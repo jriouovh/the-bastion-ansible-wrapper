@@ -1,15 +1,9 @@
-import getpass
-import json
-import logging
 import os
 import re
 import shlex
 import shutil
-import subprocess
 import sys
 import time
-
-from yaml import YAMLError, safe_load
 
 # ssh(1) options taking a value, which the next argument holds when it is not
 # attached to the option itself
@@ -35,8 +29,14 @@ SHELL_COMMAND_FLAGS = ("-c", "-lc")
 
 SHELL_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
 
+# the substring every bastion var name holds, whatever its case
+BASTION_VAR_MARKER = "bastion"
+
 # `/bin/sh -c '/bin/sh -c "..."'` is as deep as ansible nests its commands
 MAX_COMMAND_DEPTH = 3
+
+# a cache file written by another layout is read as no cache at all
+CACHE_VERSION = 2
 
 
 def find_executable(executable, path=None):
@@ -48,42 +48,32 @@ def find_executable(executable, path=None):
     return shutil.which(executable, path=path)
 
 
-def get_inventory():
-    """Fetch ansible-inventory --list
+def inventory_executable():
+    """Find ansible-inventory, which every inventory lookup runs
 
-    :return: inventory
-    :rtype: dict
+    :return: path
+    :rtype: str
     """
     inventory_cmd = find_executable("ansible-inventory")
     if not inventory_cmd:
         raise Exception("Failed to identify path of ansible-inventory")
 
-    inventory = None
-    source = get_inventory_source()
+    return inventory_cmd
 
-    # read and invalidate the inventory cache file
-    cache_file = os.environ.get("BASTION_ANSIBLE_INV_CACHE_FILE")
-    if cache_file:
-        cache = get_inventory_from_cache(
-            cache_file=cache_file,
-            cache_timeout=int(os.environ.get("BASTION_ANSIBLE_INV_CACHE_TIMEOUT", 60)),
-            source=source,
-        )
-        if cache:
-            inventory = cache.get("inventory")
 
-    if inventory:
-        return inventory
+def get_inventory(source=None):
+    """Fetch ansible-inventory --list
+
+    :return: inventory
+    :rtype: dict
+    """
+    if source is None:
+        source = get_inventory_source()
 
     # ex : export BASTION_ANSIBLE_INV_OPTIONS="-i my_inventory -i my_second_inventory"
-    command = "{} {} --list".format(inventory_cmd, source["options"])
-    inventory = get_inv_from_command(command)
-    if cache_file:
-        write_inventory_to_cache(
-            cache_file=cache_file, inventory=inventory, source=source
-        )
+    command = "{} {} --list".format(inventory_executable(), source["options"])
 
-    return inventory
+    return get_inv_from_command(command)
 
 
 def get_inventory_source():
@@ -102,14 +92,17 @@ def get_inventory_source():
     }
 
 
-def get_inventory_from_cache(cache_file, cache_timeout, source):
-    """Read ansible-inventory from cache file
+def get_bastion_hostvars_from_cache(cache_file, cache_timeout, source):
+    """Read the bastion vars of every host from the cache file
 
-    :return: Inventory cache with `updated_at` (to expire the cache), `source`
-        (the inventory it was written for) and `inventory` (results of
-        `ansible-inventory` command) keys.
+    :return: Inventory cache with `version` (the layout it was written in),
+        `updated_at` (to expire the cache), `source` (the inventory it was
+        written for), `hosts` (the bastion vars keyed by every name ansible may
+        use) and `names` (the inventory name keyed the same way) keys.
     :rtype: dict
     """
+    import json
+
     try:
         # Load JSON from cache file
         with open(cache_file, "r") as fd:
@@ -121,14 +114,15 @@ def get_inventory_from_cache(cache_file, cache_timeout, source):
         # Invalid JSON or any other error
         pass
     else:
-        # Check cache expiry and the inventory it was written for
+        # Check the layout, the cache expiry and the inventory it was written for
         if (
-            cache.get("updated_at", 0) >= int(time.time()) - cache_timeout
+            cache.get("version") == CACHE_VERSION
+            and cache.get("updated_at", 0) >= int(time.time()) - cache_timeout
             and cache.get("source") == source
         ):
             return cache
 
-    # Cache expired or any other error
+    # Cache expired, written by another version, or any other error
     try:
         os.remove(cache_file)
     except:
@@ -137,10 +131,14 @@ def get_inventory_from_cache(cache_file, cache_timeout, source):
     return None
 
 
-def write_inventory_to_cache(cache_file, inventory, source):
-    """Write inventory with last update time and source to a cache file"""
+def write_bastion_hostvars_to_cache(cache_file, hosts, names, source):
+    """Write the bastion vars of every host, with the layout, time and source"""
+    import json
+
     cache = {
-        "inventory": inventory,
+        "version": CACHE_VERSION,
+        "hosts": hosts,
+        "names": names,
         "updated_at": int(time.time()),
         "source": source,
     }
@@ -148,22 +146,127 @@ def write_inventory_to_cache(cache_file, inventory, source):
         json.dump(cache, fd)
 
 
-def get_hostvars(host) -> dict:
-    """Fetch hostvars for the given host
+def map_bastion_hostvars(inventory):
+    """Key the bastion vars of every host by every name ansible may reach it under
 
-    Ansible either uses the "ansible_host" inventory variable or the hostname.
-    Fetch inventory and browse all hostvars to return only the ones for the host.
+    Ansible either connects to the "ansible_host" inventory variable or to the
+    hostname. Only the bastion vars are kept, their jinja vars resolved while
+    the whole hostvars are still at hand, so that a lookup answers with what a
+    cache can hold, rather than with the groups and the unrelated vars a
+    listing carries and nothing here reads.
 
-    :return: hostvars
+    :return: the bastion vars keyed by host, the inventory names keyed the same way
+    :rtype: tuple
+    """
+    hosts = {}
+    names = {}
+    aliases = {}
+
+    for name, hostvars in inventory.get("_meta", {}).get("hostvars", {}).items():
+        hosts[name] = {
+            var: get_var_within(hostvars[var], hostvars)
+            for var in BASTION_VAR_NAMES
+            if var in hostvars
+        }
+        names[name] = name
+        ansible_host = hostvars.get("ansible_host")
+        if ansible_host:
+            aliases.setdefault(ansible_host, name)
+
+    # an inventory name wins over the ansible_host another host answers to
+    for ansible_host, name in aliases.items():
+        hosts.setdefault(ansible_host, hosts[name])
+        names.setdefault(ansible_host, name)
+
+    return hosts, names
+
+
+def read_bastion_hostvars(host, source, list_hosts):
+    """Read the bastion vars of a host, filling the cache file on the way
+
+    :return: the bastion vars of the host, the inventory name it is known under
+    :rtype: tuple
+    """
+    cache_file = os.environ.get("BASTION_ANSIBLE_INV_CACHE_FILE")
+    cache = None
+
+    if cache_file:
+        cache = get_bastion_hostvars_from_cache(
+            cache_file=cache_file,
+            cache_timeout=int(os.environ.get("BASTION_ANSIBLE_INV_CACHE_TIMEOUT", 60)),
+            source=source,
+        )
+
+    if cache:
+        hosts, names = cache["hosts"], cache["names"]
+    else:
+        hosts, names = list_hosts()
+        if cache_file:
+            write_bastion_hostvars_to_cache(cache_file, hosts, names, source)
+
+    return hosts.get(host, {}), names.get(host)
+
+
+def read_bastion_vars(hostvars):
+    """Keep the bastion vars of a hostvars mapping, with their jinja vars resolved
+
+    A var missing from the inventory is left out rather than held as None, so
+    that the environment still answers for it.
+
+    :return: bastion vars
     :rtype: dict
     """
-    inventory = get_inventory()
-    all_hostvars = inventory.get("_meta", {}).get("hostvars", {})
-    for inventory_host, hostvars in all_hostvars.items():
-        if inventory_host == host or hostvars.get("ansible_host") == host:
-            return hostvars
-    # Host not found
-    return {}
+    return {
+        var: get_var_within(hostvars[var], hostvars)
+        for var in BASTION_VAR_NAMES
+        if var in hostvars
+    }
+
+
+def get_hostvars_of_one_host(host):
+    """Ask ansible-inventory for a single host rather than for the whole inventory
+
+    A listing renders the vars of every host and serializes every group with
+    them, which each of the runs the wrapper makes pays for again. Asking for
+    one host skips all of it, but it answers only where ansible connects to a
+    host under its inventory name, so a miss falls back to the listing.
+
+    :return: bastion vars
+    :rtype: dict
+    """
+    command = "{} {} --host {}".format(
+        inventory_executable(),
+        get_inventory_source()["options"],
+        shlex.quote(host),
+    )
+
+    try:
+        # a host ansible reaches under another name is not an error here, it is
+        # what the listing below is left to answer for
+        hostvars = get_inv_from_command(command, quiet=True)
+    except Exception:
+        return {}
+
+    return read_bastion_vars(hostvars)
+
+
+def get_hostvars(host) -> dict:
+    """Fetch the bastion vars for the given host
+
+    :return: bastion vars
+    :rtype: dict
+    """
+    if option_enabled("BASTION_ANSIBLE_INV_HOST_LOOKUP"):
+        bastion_vars = get_hostvars_of_one_host(host)
+        if bastion_vars:
+            return bastion_vars
+
+    source = get_inventory_source()
+    bastion_vars, _ = read_bastion_hostvars(
+        host, source, lambda: map_bastion_hostvars(get_inventory(source))
+    )
+
+    return bastion_vars
 
 
 def parse_ssh_argv(argv):
@@ -282,6 +385,11 @@ def parse_bastion_env_vars(command):
     :return: bastion_host, bastion_port, bastion_user
     :rtype: tuple
     """
+    # tokenizing costs more than the command length as it grows, and no
+    # assignment can match without the substring every bastion var name holds
+    if BASTION_VAR_MARKER not in command.lower():
+        return None, None, None
+
     bastion_vars = dict.fromkeys(BASTION_VAR_NAMES)
 
     for key, value in iter_shell_assignments(command):
@@ -380,6 +488,8 @@ def manage_conf_file(conf_file, bastion_host, bastion_port, bastion_user):
     """
 
     if os.path.exists(conf_file):
+        from yaml import YAMLError, safe_load
+
         try:
             with open(conf_file, "r") as f:
                 yaml_conf = safe_load(f)
@@ -434,7 +544,10 @@ def get_var_within(my_value, hostvar, check_list=None):
     return my_value
 
 
-def get_inv_from_command(command):
+def get_inv_from_command(command, quiet=False):
+    import json
+    import subprocess
+
     p = subprocess.Popen(
         command,
         shell=True,
@@ -449,7 +562,10 @@ def get_inv_from_command(command):
         inventory = json.loads(output)
         return inventory
     else:
-        logging.error(error)
+        if not quiet:
+            if isinstance(error, bytes):
+                error = error.decode(errors="replace")
+            print(error, file=sys.stderr, end="")
         raise Exception("failed to get inventory")
 
 
@@ -461,36 +577,31 @@ def awx_get_inventory_file():
 
 
 def awx_get_vars(host_ip, inventory_file):
-    # the inventory file is a script that print the inventory in json format
-    inv = get_inv_from_command(inventory_file)
-
-    # the ssh command sent only the IP to the ansible bastion wrapper.
-    # Ansible either uses the "ansible_host" inventory variable or the hostname,
-    # so match on both, then try to fetch the required vars from its host_vars
-    host = None
-    for k, v in inv.get("_meta", {}).get("hostvars", {}).items():
-        if k == host_ip or v.get("ansible_host") == host_ip:
-            host = k
-            host_vars = v
-            break
+    # the inventory file is a script that print the inventory in json format.
+    # The ssh command sent only the IP to the ansible bastion wrapper, and
+    # ansible either uses the "ansible_host" inventory variable or the
+    # hostname, so the mapping answers to both. It goes through the same cache
+    # file as a listing does, keyed on the inventory file it was built from.
+    source = dict(get_inventory_source(), options="-i {}".format(inventory_file))
+    bastion_vars, host = read_bastion_hostvars(
+        host_ip,
+        source,
+        lambda: map_bastion_hostvars(get_inv_from_command(shlex.quote(inventory_file))),
+    )
 
     # this should not happen
     if not host:
         return {}
 
-    bastion_vars = get_bastion_vars(host_vars)
-
-    if None not in [
-        bastion_vars.get("bastion_host"),
-        bastion_vars.get("bastion_port"),
-        bastion_vars.get("bastion_user"),
-    ]:
+    if all(bastion_vars.get(var) is not None for var in BASTION_VAR_NAMES):
         return bastion_vars
 
     # if some bastion vars are missing, maybe they are defined as group_vars.
     # We do an inventory lookup to get them.
     # With AWX no need to list the whole inventory, we already know the host
-    command = "ansible-inventory -i {} --host {}".format(inventory_file, host)
+    command = "ansible-inventory -i {} --host {}".format(
+        shlex.quote(inventory_file), shlex.quote(host)
+    )
     return get_inv_from_command(command)
 
 
@@ -506,12 +617,23 @@ def source_enabled(name):
     return os.environ.get(name, "1").strip().lower() not in ("0", "no", "false", "off")
 
 
+def option_enabled(name):
+    """Tell whether an option is turned on, as none of them is by default
+
+    :return: option enabled
+    :rtype: bool
+    """
+    return os.environ.get(name, "0").strip().lower() in ("1", "yes", "true", "on")
+
+
 def fill_bastion_vars(hostvar, bastion_host, bastion_port, bastion_user):
     """Fill the bastion vars an earlier source left unset
 
     Each one falls back to the inventory, then to the environment, then to a
     default, so that a var found earlier survives a lookup made for another one.
     """
+    import getpass
+
     env = os.environ if source_enabled("BASTION_OS_ENV_ENABLED") else {}
 
     if not bastion_host:

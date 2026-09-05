@@ -1,5 +1,8 @@
+import json
 import os
+import subprocess
 import sys
+import time
 
 import pytest
 from yaml import dump
@@ -231,7 +234,7 @@ def fake_awx_inventory(monkeypatch, hostvars, host_lookup=None):
     """Answer the AWX inventory script, then the per-host lookup it may run"""
     commands = []
 
-    def fake_get_inv_from_command(command):
+    def fake_get_inv_from_command(command, quiet=False):
         commands.append(command)
         if command == AWX_INVENTORY_FILE:
             return {"_meta": {"hostvars": hostvars}}
@@ -696,15 +699,33 @@ def test_sftpwrapper_keeps_the_host_of_the_configuration_file(monkeypatch):
     assert args[1].endswith("@{}".format(BASTION_HOST))
 
 
-INVENTORY = {"_meta": {"hostvars": {"target": {"bastion_host": BASTION_HOST}}}}
+INVENTORY = {
+    "_meta": {
+        "hostvars": {
+            "target": {
+                "ansible_host": "10.0.0.1",
+                "bastion_host": BASTION_HOST,
+                "unrelated_var": "x" * 64,
+            }
+        }
+    },
+    "all": {"children": ["a_group"]},
+    "a_group": {"hosts": ["target"], "vars": {"a_group_var": "y" * 64}},
+}
+
+HOST_LOOKUP_VARS = {"bastion_host": BASTION_HOST, "bastion_port": 2222}
 
 
 def count_inventory_commands(monkeypatch, tmp_path):
-    """Make the inventory command countable and cached in a file of its own"""
+    """Make the inventory commands countable and cached in a file of its own"""
     commands = []
 
-    def fake_get_inv_from_command(command):
+    def fake_get_inv_from_command(command, quiet=False):
         commands.append(command)
+        if "--host" in command:
+            if "unknown" in command:
+                raise Exception("failed to get inventory")
+            return HOST_LOOKUP_VARS
         return INVENTORY
 
     monkeypatch.setattr(lib, "get_inv_from_command", fake_get_inv_from_command)
@@ -713,53 +734,160 @@ def count_inventory_commands(monkeypatch, tmp_path):
     monkeypatch.delenv("BASTION_ANSIBLE_INV_OPTIONS", raising=False)
     monkeypatch.delenv("ANSIBLE_INVENTORY", raising=False)
     monkeypatch.delenv("ANSIBLE_CONFIG", raising=False)
+    monkeypatch.delenv("BASTION_ANSIBLE_INV_HOST_LOOKUP", raising=False)
     return commands
 
 
-def test_get_inventory_runs_the_command_once_for_the_same_source(monkeypatch, tmp_path):
+TARGET_BASTION_VARS = {"bastion_host": BASTION_HOST}
+
+
+def test_get_hostvars_runs_the_command_once_for_the_same_source(monkeypatch, tmp_path):
     commands = count_inventory_commands(monkeypatch, tmp_path)
-    assert lib.get_inventory() == INVENTORY
-    assert lib.get_inventory() == INVENTORY
+    assert lib.get_hostvars("target") == TARGET_BASTION_VARS
+    assert lib.get_hostvars("target") == TARGET_BASTION_VARS
     assert len(commands) == 1
 
 
-def test_get_inventory_runs_the_command_again_for_another_option(monkeypatch, tmp_path):
+def test_get_hostvars_runs_the_command_again_for_another_option(monkeypatch, tmp_path):
     commands = count_inventory_commands(monkeypatch, tmp_path)
     monkeypatch.setenv("BASTION_ANSIBLE_INV_OPTIONS", "-i first.yml")
-    lib.get_inventory()
+    lib.get_hostvars("target")
     monkeypatch.setenv("BASTION_ANSIBLE_INV_OPTIONS", "-i second.yml")
-    lib.get_inventory()
+    lib.get_hostvars("target")
     assert len(commands) == 2
 
 
-def test_get_inventory_runs_the_command_again_for_another_inventory(
+def test_get_hostvars_runs_the_command_again_for_another_inventory(
     monkeypatch, tmp_path
 ):
     commands = count_inventory_commands(monkeypatch, tmp_path)
     monkeypatch.setenv("ANSIBLE_INVENTORY", "first.yml")
-    lib.get_inventory()
+    lib.get_hostvars("target")
     monkeypatch.setenv("ANSIBLE_INVENTORY", "second.yml")
-    lib.get_inventory()
+    lib.get_hostvars("target")
     assert len(commands) == 2
 
 
-def test_get_inventory_runs_the_command_again_for_another_config(monkeypatch, tmp_path):
+def test_get_hostvars_runs_the_command_again_for_another_config(monkeypatch, tmp_path):
     commands = count_inventory_commands(monkeypatch, tmp_path)
     monkeypatch.setenv("ANSIBLE_CONFIG", "first.cfg")
-    lib.get_inventory()
+    lib.get_hostvars("target")
     monkeypatch.setenv("ANSIBLE_CONFIG", "second.cfg")
-    lib.get_inventory()
+    lib.get_hostvars("target")
     assert len(commands) == 2
 
 
-def test_get_inventory_runs_the_command_once_per_call_without_a_cache_file(
+def test_get_hostvars_runs_the_command_once_per_call_without_a_cache_file(
     monkeypatch, tmp_path
 ):
     commands = count_inventory_commands(monkeypatch, tmp_path)
     monkeypatch.delenv("BASTION_ANSIBLE_INV_CACHE_FILE")
-    lib.get_inventory()
-    lib.get_inventory()
+    lib.get_hostvars("target")
+    lib.get_hostvars("target")
     assert len(commands) == 2
+
+
+def read_cache(tmp_path):
+    return json.loads((tmp_path / "cache.json").read_text())
+
+
+def test_get_hostvars_caches_the_bastion_vars_alone(monkeypatch, tmp_path):
+    count_inventory_commands(monkeypatch, tmp_path)
+    lib.get_hostvars("target")
+    cache = read_cache(tmp_path)
+    assert cache["hosts"] == {
+        "target": TARGET_BASTION_VARS,
+        "10.0.0.1": TARGET_BASTION_VARS,
+    }
+    written = json.dumps(cache)
+    assert "unrelated_var" not in written
+    assert "a_group" not in written
+
+
+def test_get_hostvars_reads_a_host_by_its_ansible_host(monkeypatch, tmp_path):
+    count_inventory_commands(monkeypatch, tmp_path)
+    assert lib.get_hostvars("10.0.0.1") == TARGET_BASTION_VARS
+
+
+def test_get_hostvars_of_an_unknown_host(monkeypatch, tmp_path):
+    count_inventory_commands(monkeypatch, tmp_path)
+    assert lib.get_hostvars("nowhere") == {}
+
+
+def test_get_hostvars_resolves_a_jinja_var_before_caching(monkeypatch, tmp_path):
+    count_inventory_commands(monkeypatch, tmp_path)
+    monkeypatch.setitem(
+        INVENTORY["_meta"]["hostvars"],
+        "jinja_target",
+        {"bastion_host": "{{ my_bastion }}", "my_bastion": BASTION_HOST},
+    )
+    try:
+        assert lib.get_hostvars("jinja_target") == {"bastion_host": BASTION_HOST}
+        assert read_cache(tmp_path)["hosts"]["jinja_target"] == {
+            "bastion_host": BASTION_HOST
+        }
+    finally:
+        INVENTORY["_meta"]["hostvars"].pop("jinja_target", None)
+
+
+def write_cache(tmp_path, version=None, age=0):
+    """Leave a cache file holding a bastion host no listing ever answers"""
+    (tmp_path / "cache.json").write_text(
+        json.dumps(
+            {
+                "version": lib.CACHE_VERSION if version is None else version,
+                "updated_at": int(time.time()) - age,
+                "source": lib.get_inventory_source(),
+                "hosts": {"target": {"bastion_host": "stale_bastion"}},
+                "names": {"target": "target"},
+            }
+        )
+    )
+
+
+def test_get_hostvars_answers_from_a_fresh_cache(monkeypatch, tmp_path):
+    commands = count_inventory_commands(monkeypatch, tmp_path)
+    write_cache(tmp_path)
+    assert lib.get_hostvars("target") == {"bastion_host": "stale_bastion"}
+    assert commands == []
+
+
+def test_get_hostvars_ignores_a_cache_of_another_format(monkeypatch, tmp_path):
+    commands = count_inventory_commands(monkeypatch, tmp_path)
+    write_cache(tmp_path, version=lib.CACHE_VERSION - 1)
+    assert lib.get_hostvars("target") == TARGET_BASTION_VARS
+    assert len(commands) == 1
+
+
+def test_get_hostvars_ignores_an_expired_cache(monkeypatch, tmp_path):
+    commands = count_inventory_commands(monkeypatch, tmp_path)
+    write_cache(tmp_path, age=61)
+    assert lib.get_hostvars("target") == TARGET_BASTION_VARS
+    assert len(commands) == 1
+
+
+def test_get_hostvars_asks_for_the_host_alone_when_told_to(monkeypatch, tmp_path):
+    commands = count_inventory_commands(monkeypatch, tmp_path)
+    monkeypatch.setenv("BASTION_ANSIBLE_INV_HOST_LOOKUP", "1")
+    assert lib.get_hostvars("target") == HOST_LOOKUP_VARS
+    assert commands == ["/usr/bin/ansible-inventory  --host target"]
+
+
+def test_get_hostvars_lists_the_inventory_when_the_host_lookup_finds_nothing(
+    monkeypatch, tmp_path
+):
+    commands = count_inventory_commands(monkeypatch, tmp_path)
+    monkeypatch.setenv("BASTION_ANSIBLE_INV_HOST_LOOKUP", "1")
+    assert lib.get_hostvars("unknown") == {}
+    assert len(commands) == 2
+    assert "--host unknown" in commands[0]
+    assert "--list" in commands[1]
+
+
+def test_get_hostvars_host_lookup_is_off_by_default(monkeypatch, tmp_path):
+    commands = count_inventory_commands(monkeypatch, tmp_path)
+    lib.get_hostvars("target")
+    assert "--list" in commands[0]
 
 
 def count_lookups(monkeypatch):
@@ -1122,3 +1250,58 @@ def test_sshwrapper_control_master_operation_drops_the_bastion_options():
         exec_wrapper(sshwrapper, ["-o", "BastionHost={}".format(BASTION_HOST)] + argv)
         == ["ssh"] + argv
     )
+
+
+DEFERRED_IMPORTS = ("getpass", "json", "logging", "subprocess", "yaml")
+
+
+def test_lib_defers_the_costly_imports():
+    """Every one of them serves a single code path and none is always taken"""
+    code = "import sys, lib; print(' '.join(m for m in {!r} if m in sys.modules))"
+    loaded = subprocess.run(
+        [sys.executable, "-c", code.format(DEFERRED_IMPORTS)],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert loaded.stdout.split() == []
+
+
+def test_parse_bastion_env_vars_skips_a_command_holding_no_bastion_name(monkeypatch):
+    def unexpected_split(command):
+        raise AssertionError("tokenized a command that carries no bastion var")
+
+    monkeypatch.setattr(lib, "split_command", unexpected_split)
+    assert parse_bastion_env_vars("/bin/sh -c '/usr/bin/python3 -c pass'") == (
+        None,
+        None,
+        None,
+    )
+
+
+def test_parse_bastion_env_vars_reads_a_lowercase_assignment():
+    command = "/bin/sh -c 'bastion_host={} /usr/bin/python3'".format(BASTION_HOST)
+    assert parse_bastion_env_vars(command)[0] == BASTION_HOST
+
+
+def test_get_inv_from_command_reports_a_failure_as_text(capsys):
+    with pytest.raises(Exception, match="failed to get inventory"):
+        lib.get_inv_from_command("echo inventory boom >&2; exit 5")
+    assert capsys.readouterr().err.strip() == "inventory boom"
+
+
+def test_get_inv_from_command_stays_quiet_when_told_to(capsys):
+    with pytest.raises(Exception, match="failed to get inventory"):
+        lib.get_inv_from_command("echo inventory boom >&2; exit 5", quiet=True)
+    assert capsys.readouterr().err == ""
+
+
+def test_get_hostvars_host_lookup_miss_stays_quiet(monkeypatch, capsys):
+    """An unknown host is what the listing is there to answer, not an error"""
+    monkeypatch.setattr(
+        lib, "inventory_executable", lambda: "echo no such host >&2; exit 5;"
+    )
+    monkeypatch.delenv("BASTION_ANSIBLE_INV_OPTIONS", raising=False)
+    assert lib.get_hostvars_of_one_host("nope") == {}
+    assert capsys.readouterr().err == ""
