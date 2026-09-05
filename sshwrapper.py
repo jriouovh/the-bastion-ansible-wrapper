@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 
-import getpass
 import os
 import sys
 
 from lib import (
     awx_get_inventory_file,
     awx_get_vars,
+    check_bastion_host,
+    fill_bastion_vars,
     find_executable,
     get_hostvars,
-    get_var_within,
     has_remote_command,
     manage_conf_file,
     parse_bastion_env_vars,
@@ -61,7 +61,6 @@ def main():
     # lookup on the inventory may take some time, depending on the source, so use it only if not defined elsewhere
     # it seems like some module like template does not send env vars too...
     if not bastion_host or not bastion_port or not bastion_user:
-
         # check if running on AWX, we'll get the vars in a different way
         awx_inventory_file = awx_get_inventory_file()
         if os.path.exists(awx_inventory_file):
@@ -69,20 +68,11 @@ def main():
         else:
             hostvar = get_hostvars(host)  # dict
 
-        # manage the case where a bastion var is defined from another var
-        # Ex: bastion_host = {{ my_bastion_host }}
-        bastion_port = get_var_within(
-            hostvar.get("bastion_port", os.environ.get("BASTION_PORT", 22)), hostvar
+        bastion_host, bastion_port, bastion_user = fill_bastion_vars(
+            hostvar, bastion_host, bastion_port, bastion_user
         )
-        bastion_user = get_var_within(
-            hostvar.get(
-                "bastion_user", os.environ.get("BASTION_USER", getpass.getuser())
-            ),
-            hostvar,
-        )
-        bastion_host = get_var_within(
-            hostvar.get("bastion_host", os.environ.get("BASTION_HOST")), hostvar
-        )
+
+    check_bastion_host(bastion_host)
 
     for i, e in enumerate(options):
 

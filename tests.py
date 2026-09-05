@@ -4,12 +4,15 @@ import sys
 import pytest
 from yaml import dump
 
+import lib
 import scpwrapper
 import sftpwrapper
 import sshwrapper
 from lib import (
     awx_get_inventory_file,
+    check_bastion_host,
     find_executable,
+    fill_bastion_vars,
     get_bastion_vars,
     get_var_within,
     has_remote_command,
@@ -22,6 +25,7 @@ BASTION_HOST = "my_bastion"
 BASTION_PORT = 22
 BASTION_USER = "my_bastion_user"
 BASTION_CONF_FILE = "/tmp/test_bastion_conf_file.yml"
+BASTION_HOST_ONLY_CONF_FILE = "/tmp/test_bastion_host_only_conf_file.yml"
 
 real_execv = os.execv
 
@@ -147,6 +151,14 @@ def write_conf_file(conf_file):
 
 
 write_conf_file(BASTION_CONF_FILE)
+
+
+def write_host_only_conf_file(conf_file):
+    with open(conf_file, "w") as f:
+        dump({"bastion_host": BASTION_HOST}, f)
+
+
+write_host_only_conf_file(BASTION_HOST_ONLY_CONF_FILE)
 
 
 def test_get_var_within_one_level():
@@ -517,3 +529,251 @@ def test_scpwrapper_without_a_command_to_proxy():
 def test_sftpwrapper_without_a_host_to_proxy():
     with pytest.raises(SystemExit):
         exec_wrapper(sftpwrapper, ["-s"])
+
+
+def test_check_bastion_host_defined():
+    check_bastion_host(BASTION_HOST)
+
+
+def test_check_bastion_host_undefined():
+    with pytest.raises(SystemExit) as excinfo:
+        check_bastion_host(None)
+    assert str(excinfo.value) == (
+        "bastion wrapper: no bastion host found for this connection"
+    )
+
+
+def test_check_bastion_host_empty():
+    with pytest.raises(SystemExit):
+        check_bastion_host("")
+
+
+def test_sshwrapper_without_a_bastion_host(monkeypatch):
+    monkeypatch.delenv("BASTION_HOST", raising=False)
+    monkeypatch.setattr(sshwrapper, "get_hostvars", lambda host: {})
+    with pytest.raises(SystemExit):
+        exec_wrapper(sshwrapper, SSH_ARGS + ["/bin/sh -c 'true'"])
+
+
+def test_scpwrapper_without_a_bastion_host(monkeypatch):
+    monkeypatch.delenv("BASTION_HOST", raising=False)
+    monkeypatch.setattr(scpwrapper, "get_hostvars", lambda host: {})
+    with pytest.raises(SystemExit):
+        exec_wrapper(scpwrapper, SCP_ARGS)
+
+
+def test_sftpwrapper_without_a_bastion_host(monkeypatch):
+    monkeypatch.delenv("BASTION_HOST", raising=False)
+    monkeypatch.setattr(sftpwrapper, "get_hostvars", lambda host: {})
+    with pytest.raises(SystemExit):
+        exec_wrapper(sftpwrapper, SFTP_ARGS)
+
+
+def test_fill_bastion_vars_keeps_the_values_it_is_given():
+    bastion_host, bastion_port, bastion_user = fill_bastion_vars(
+        {"bastion_host": "from_inventory", "bastion_port": 2222, "bastion_user": "inv"},
+        BASTION_HOST,
+        BASTION_PORT,
+        BASTION_USER,
+    )
+    assert bastion_host == BASTION_HOST
+    assert bastion_port == BASTION_PORT
+    assert bastion_user == BASTION_USER
+
+
+def test_fill_bastion_vars_fills_the_missing_ones():
+    hostvar = {"bastion_host": "from_inventory", "bastion_port": 2222}
+    bastion_host, bastion_port, bastion_user = fill_bastion_vars(
+        hostvar, None, None, BASTION_USER
+    )
+    assert bastion_host == "from_inventory"
+    assert bastion_port == 2222
+    assert bastion_user == BASTION_USER
+
+
+def test_fill_bastion_vars_resolves_a_jinja_var():
+    hostvar = {"bastion_host": "{{ my_bastion }}", "my_bastion": BASTION_HOST}
+    bastion_host, _, _ = fill_bastion_vars(hostvar, None, BASTION_PORT, BASTION_USER)
+    assert bastion_host == BASTION_HOST
+
+
+def test_sshwrapper_keeps_the_host_of_the_configuration_file(monkeypatch):
+    monkeypatch.delenv("BASTION_HOST", raising=False)
+    monkeypatch.setattr(sshwrapper, "get_hostvars", lambda host: {})
+    args = exec_wrapper(
+        sshwrapper,
+        SSH_ARGS + ["/bin/sh -c 'true'"],
+        conf_file=BASTION_HOST_ONLY_CONF_FILE,
+    )
+    assert BASTION_HOST in args
+
+
+def test_sshwrapper_keeps_the_vars_of_the_command(monkeypatch):
+    monkeypatch.delenv("BASTION_HOST", raising=False)
+    monkeypatch.setattr(sshwrapper, "get_hostvars", lambda host: {})
+    command = "/bin/sh -c 'BASTION_HOST={} BASTION_USER={} /usr/bin/python3'".format(
+        BASTION_HOST, BASTION_USER
+    )
+    args = exec_wrapper(sshwrapper, SSH_ARGS + [command])
+    assert args[:9] == [
+        "ssh",
+        "-p",
+        str(BASTION_PORT),
+        "-q",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-l",
+        BASTION_USER,
+        BASTION_HOST,
+    ]
+
+
+def test_scpwrapper_keeps_the_host_of_the_configuration_file(monkeypatch):
+    monkeypatch.delenv("BASTION_HOST", raising=False)
+    monkeypatch.setattr(scpwrapper, "get_hostvars", lambda host: {})
+    args = exec_wrapper(scpwrapper, SCP_ARGS, conf_file=BASTION_HOST_ONLY_CONF_FILE)
+    assert args[1].endswith("@{}".format(BASTION_HOST))
+
+
+def test_sftpwrapper_keeps_the_host_of_the_configuration_file(monkeypatch):
+    monkeypatch.delenv("BASTION_HOST", raising=False)
+    monkeypatch.setattr(sftpwrapper, "get_hostvars", lambda host: {})
+    args = exec_wrapper(sftpwrapper, SFTP_ARGS, conf_file=BASTION_HOST_ONLY_CONF_FILE)
+    assert args[1].endswith("@{}".format(BASTION_HOST))
+
+
+INVENTORY = {"_meta": {"hostvars": {"target": {"bastion_host": BASTION_HOST}}}}
+
+
+def count_inventory_commands(monkeypatch, tmp_path):
+    """Make the inventory command countable and cached in a file of its own"""
+    commands = []
+
+    def fake_get_inv_from_command(command):
+        commands.append(command)
+        return INVENTORY
+
+    monkeypatch.setattr(lib, "get_inv_from_command", fake_get_inv_from_command)
+    monkeypatch.setattr(lib, "find_executable", lambda e, path=None: "/usr/bin/" + e)
+    monkeypatch.setenv("BASTION_ANSIBLE_INV_CACHE_FILE", str(tmp_path / "cache.json"))
+    monkeypatch.delenv("BASTION_ANSIBLE_INV_OPTIONS", raising=False)
+    monkeypatch.delenv("ANSIBLE_INVENTORY", raising=False)
+    monkeypatch.delenv("ANSIBLE_CONFIG", raising=False)
+    return commands
+
+
+def test_get_inventory_runs_the_command_once_for_the_same_source(monkeypatch, tmp_path):
+    commands = count_inventory_commands(monkeypatch, tmp_path)
+    assert lib.get_inventory() == INVENTORY
+    assert lib.get_inventory() == INVENTORY
+    assert len(commands) == 1
+
+
+def test_get_inventory_runs_the_command_again_for_another_option(monkeypatch, tmp_path):
+    commands = count_inventory_commands(monkeypatch, tmp_path)
+    monkeypatch.setenv("BASTION_ANSIBLE_INV_OPTIONS", "-i first.yml")
+    lib.get_inventory()
+    monkeypatch.setenv("BASTION_ANSIBLE_INV_OPTIONS", "-i second.yml")
+    lib.get_inventory()
+    assert len(commands) == 2
+
+
+def test_get_inventory_runs_the_command_again_for_another_inventory(
+    monkeypatch, tmp_path
+):
+    commands = count_inventory_commands(monkeypatch, tmp_path)
+    monkeypatch.setenv("ANSIBLE_INVENTORY", "first.yml")
+    lib.get_inventory()
+    monkeypatch.setenv("ANSIBLE_INVENTORY", "second.yml")
+    lib.get_inventory()
+    assert len(commands) == 2
+
+
+def test_get_inventory_runs_the_command_again_for_another_config(monkeypatch, tmp_path):
+    commands = count_inventory_commands(monkeypatch, tmp_path)
+    monkeypatch.setenv("ANSIBLE_CONFIG", "first.cfg")
+    lib.get_inventory()
+    monkeypatch.setenv("ANSIBLE_CONFIG", "second.cfg")
+    lib.get_inventory()
+    assert len(commands) == 2
+
+
+def test_get_inventory_runs_the_command_once_per_call_without_a_cache_file(
+    monkeypatch, tmp_path
+):
+    commands = count_inventory_commands(monkeypatch, tmp_path)
+    monkeypatch.delenv("BASTION_ANSIBLE_INV_CACHE_FILE")
+    lib.get_inventory()
+    lib.get_inventory()
+    assert len(commands) == 2
+
+
+def count_lookups(monkeypatch):
+    """Count what a wrapper reads outside of its own arguments"""
+    lookups = {"inventory": [], "conf_file": []}
+
+    monkeypatch.setattr(
+        lib,
+        "get_inv_from_command",
+        lambda command: (lookups["inventory"].append(command), INVENTORY)[1],
+    )
+
+    real_manage_conf_file = lib.manage_conf_file
+
+    def counting_manage_conf_file(conf_file, *args):
+        lookups["conf_file"].append(conf_file)
+        return real_manage_conf_file(conf_file, *args)
+
+    for wrapper in (sshwrapper, scpwrapper, sftpwrapper):
+        monkeypatch.setattr(wrapper, "manage_conf_file", counting_manage_conf_file)
+        monkeypatch.setattr(wrapper, "get_hostvars", lib.get_hostvars)
+
+    return lookups
+
+
+def test_sshwrapper_reads_nothing_for_a_local_operation(monkeypatch):
+    lookups = count_lookups(monkeypatch)
+    exec_wrapper(sshwrapper, ["-V"])
+    assert lookups == {"inventory": [], "conf_file": []}
+
+
+def test_sshwrapper_reads_nothing_when_the_command_carries_the_vars(monkeypatch):
+    lookups = count_lookups(monkeypatch)
+    exec_wrapper(sshwrapper, SSH_ARGS + [AWX_COMMAND])
+    assert lookups == {"inventory": [], "conf_file": []}
+
+
+def test_sshwrapper_skips_the_inventory_for_a_complete_configuration_file(monkeypatch):
+    lookups = count_lookups(monkeypatch)
+    exec_wrapper(
+        sshwrapper, SSH_ARGS + ["/bin/sh -c true"], conf_file=BASTION_CONF_FILE
+    )
+    assert lookups["conf_file"] == [BASTION_CONF_FILE]
+    assert lookups["inventory"] == []
+
+
+def test_scpwrapper_skips_the_inventory_for_a_complete_configuration_file(monkeypatch):
+    lookups = count_lookups(monkeypatch)
+    exec_wrapper(scpwrapper, SCP_ARGS, conf_file=BASTION_CONF_FILE)
+    assert lookups["conf_file"] == [BASTION_CONF_FILE]
+    assert lookups["inventory"] == []
+
+
+def test_sftpwrapper_skips_the_inventory_for_a_complete_configuration_file(monkeypatch):
+    lookups = count_lookups(monkeypatch)
+    exec_wrapper(sftpwrapper, SFTP_ARGS, conf_file=BASTION_CONF_FILE)
+    assert lookups["conf_file"] == [BASTION_CONF_FILE]
+    assert lookups["inventory"] == []
+
+
+def test_sshwrapper_lists_the_inventory_once_for_a_missing_var(monkeypatch):
+    lookups = count_lookups(monkeypatch)
+    monkeypatch.delenv("BASTION_ANSIBLE_INV_CACHE_FILE", raising=False)
+    monkeypatch.setattr(lib, "find_executable", lambda e, path=None: "/usr/bin/" + e)
+    exec_wrapper(
+        sshwrapper,
+        SSH_ARGS + ["/bin/sh -c true"],
+        conf_file=BASTION_HOST_ONLY_CONF_FILE,
+    )
+    assert len(lookups["inventory"]) == 1
+    assert len(lookups["conf_file"]) == 1

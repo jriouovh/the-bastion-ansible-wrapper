@@ -58,6 +58,10 @@ multiple calls with the following environment variables:
 
 Note: the cache file will not be removed by the wrapper at the end of the run, which means that multiple consecutive runs might use it, as long as it's fresh enough (the expiration of `BASTION_ANSIBLE_INV_CACHE_TIMEOUT` will force a refresh).
 
+A cache file holds the inventory of a single source. A run reading another one, through `BASTION_ANSIBLE_INV_OPTIONS`, `ANSIBLE_INVENTORY` or `ANSIBLE_CONFIG`, lists it again and replaces the cache rather than answering from the inventory of the previous run.
+
+The wrapper runs once per task and per host, and lists the inventory on each of those runs when it needs it. Setting the cache file is what turns that into a single listing for the whole playbook.
+
 If not set, the cache will not be used, even if `cache` is set at the Ansible level.
 
 ## Using env vars from a playbook
@@ -114,6 +118,9 @@ Source of variables are read in the following order:
 * configuration file
 * Ansible inventory
 * operating system environment variables
+
+A source is read only when a variable is still missing, and the first one
+holding it wins.
 
 ## Using multiple inventories sources
 
@@ -230,6 +237,30 @@ This has been tested with
 ## Debug
 
 If this doesn't seem to work, run your ansible with `-vvvv`, you'll see whether it actually attempts to use the wrappers or not.
+
+### no bastion host found for this connection
+
+The wrapper found `bastion_host` in none of the sources listed in
+[Configuration priority](#configuration-priority). Define it as `bastion_host`
+in the Ansible inventory, as `BASTION_HOST` in the environment, or as
+`bastion_host` in the configuration file.
+
+The most common cause is an inventory passed on the command line with
+`ansible -i my_inventory.yml`: the wrapper is executed by Ansible in place of
+ssh, it does not receive the command line of the ansible run, and its own
+`ansible-inventory --list` therefore reads the default inventory instead of
+yours. Either declare the inventory in `ansible.cfg`:
+
+```ini
+[defaults]
+inventory = my_inventory.yml
+```
+
+or point the wrapper at it:
+
+```bash
+export BASTION_ANSIBLE_INV_OPTIONS='-i my_inventory.yml'
+```
 
 ## Lint
 

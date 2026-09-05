@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 
-import getpass
 import os
 import sys
 
 from lib import (
+    check_bastion_host,
+    fill_bastion_vars,
     find_executable,
     get_hostvars,
     manage_conf_file,
@@ -73,11 +74,11 @@ def main():
     if not bastion_host or not bastion_port or not bastion_user:
         hostvar = get_hostvars(host)  # dict
 
-        bastion_port = hostvar.get("bastion_port", os.environ.get("BASTION_PORT", 22))
-        bastion_user = hostvar.get(
-            "bastion_user", os.environ.get("BASTION_USER", getpass.getuser())
+        bastion_host, bastion_port, bastion_user = fill_bastion_vars(
+            hostvar, bastion_host, bastion_port, bastion_user
         )
-        bastion_host = hostvar.get("bastion_host", os.environ.get("BASTION_HOST"))
+
+    check_bastion_host(bastion_host)
 
     # syscall exec
     args = (

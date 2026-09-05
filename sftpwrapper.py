@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 
-import getpass
 import os
 import sys
 
-from lib import find_executable, get_hostvars, manage_conf_file
+from lib import (
+    check_bastion_host,
+    fill_bastion_vars,
+    find_executable,
+    get_hostvars,
+    manage_conf_file,
+)
 
 
 def main():
@@ -57,12 +62,12 @@ def main():
 
     # Read from inventory and environment variables
     if not bastion_host or not bastion_port or not bastion_user:
-        inventory = get_hostvars(host)
-        bastion_port = inventory.get("bastion_port", os.getenv("BASTION_PORT", 22))
-        bastion_user = inventory.get(
-            "bastion_user", os.getenv("BASTION_USER", getpass.getuser())
+        hostvar = get_hostvars(host)
+        bastion_host, bastion_port, bastion_user = fill_bastion_vars(
+            hostvar, bastion_host, bastion_port, bastion_user
         )
-        bastion_host = inventory.get("bastion_host", os.getenv("BASTION_HOST"))
+
+    check_bastion_host(bastion_host)
 
     # ansible passes the identity file and its ssh options to sftp, which hands
     # them over here, and the bastion connection needs them

@@ -141,6 +141,21 @@ bastion_host: 127.0.0.1
 bastion_port: $bastion_port
 EOF
 
+# the bastion user is missing on purpose, the inventory below carries it
+cat > "$workdir/bastion-no-user.yml" <<EOF
+bastion_host: 127.0.0.1
+bastion_port: $bastion_port
+EOF
+
+cat > "$workdir/hosts-bastion-user" <<EOF
+[all]
+target ansible_host=$target_ip
+
+[all:vars]
+ansible_user=$remote_user
+bastion_user=$account
+EOF
+
 export ANSIBLE_CONFIG="$workdir/ansible.cfg"
 export ANSIBLE_PRIVATE_KEY_FILE="$workdir/id_ansible"
 unset BASTION_USER BASTION_HOST BASTION_PORT
@@ -205,6 +220,23 @@ log "environment variables as the only source of the bastion vars"
     export BASTION_PORT="$bastion_port"
     BASTION_CONF_FILE=/nonexistent playbook os-env-vars
 )
+
+log "configuration file and inventory sharing the bastion vars"
+BASTION_CONF_FILE="$workdir/bastion-no-user.yml" \
+    ANSIBLE_INVENTORY="$workdir/hosts-bastion-user" playbook mixed-sources
+
+# the inventory of ansible.cfg holds no bastion vars, and neither does any
+# other source, the shape reported in issue #4
+log "no source of the bastion vars"
+missing=$(BASTION_CONF_FILE=/nonexistent playbook no-bastion-host 2>&1) || true
+case "$missing" in
+    *"no bastion host found for this connection"*) ;;
+    *)
+        echo "the wrapper did not report the missing bastion host:" >&2
+        echo "$missing" >&2
+        exit 1
+        ;;
+esac
 
 log "scp wrapper, bastion vars from the configuration file"
 BASTION_CONF_FILE="$workdir/bastion.yml" ANSIBLE_SSH_TRANSFER_METHOD=scp \
