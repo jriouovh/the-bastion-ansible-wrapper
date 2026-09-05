@@ -381,11 +381,11 @@ def awx_get_vars(host_ip, inventory_file):
     inv = get_inv_from_command(inventory_file)
 
     # the ssh command sent only the IP to the ansible bastion wrapper.
-    # We are looking for the host which "ansible_host" has the same ip, then try to fetch the required vars from
-    # its host_vars
+    # Ansible either uses the "ansible_host" inventory variable or the hostname,
+    # so match on both, then try to fetch the required vars from its host_vars
     host = None
     for k, v in inv.get("_meta", {}).get("hostvars", {}).items():
-        if v.get("ansible_host") == host_ip:
+        if k == host_ip or v.get("ansible_host") == host_ip:
             host = k
             host_vars = v
             break

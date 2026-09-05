@@ -10,6 +10,7 @@ import sftpwrapper
 import sshwrapper
 from lib import (
     awx_get_inventory_file,
+    awx_get_vars,
     check_bastion_host,
     find_executable,
     fill_bastion_vars,
@@ -214,6 +215,57 @@ def test_awx_get_inventory_file_env_defined():
     os.environ["AWX_RUN_DIR"] = env_path
     assert awx_get_inventory_file() == f"{env_path}/inventory/hosts"
     os.environ.pop("AWX_RUN_DIR")
+
+
+AWX_HOST = "serv01.example.net"
+AWX_INVENTORY_FILE = "/runner/inventory/hosts"
+AWX_BASTION_VARS = {
+    "bastion_host": BASTION_HOST,
+    "bastion_port": BASTION_PORT,
+    "bastion_user": BASTION_USER,
+}
+
+
+def fake_awx_inventory(monkeypatch, hostvars, host_lookup=None):
+    """Answer the AWX inventory script, then the per-host lookup it may run"""
+    commands = []
+
+    def fake_get_inv_from_command(command):
+        commands.append(command)
+        if command == AWX_INVENTORY_FILE:
+            return {"_meta": {"hostvars": hostvars}}
+        return host_lookup or {}
+
+    monkeypatch.setattr(lib, "get_inv_from_command", fake_get_inv_from_command)
+    return commands
+
+
+def test_awx_get_vars_without_ansible_host(monkeypatch):
+    fake_awx_inventory(monkeypatch, {AWX_HOST: dict(AWX_BASTION_VARS)})
+    assert awx_get_vars(AWX_HOST, AWX_INVENTORY_FILE) == AWX_BASTION_VARS
+
+
+def test_awx_get_vars_with_ansible_host(monkeypatch):
+    hostvars = dict(AWX_BASTION_VARS, ansible_host="10.0.0.1")
+    fake_awx_inventory(monkeypatch, {AWX_HOST: hostvars})
+    assert awx_get_vars("10.0.0.1", AWX_INVENTORY_FILE) == AWX_BASTION_VARS
+
+
+def test_awx_get_vars_without_ansible_host_falls_back_to_group_vars(monkeypatch):
+    commands = fake_awx_inventory(
+        monkeypatch,
+        {AWX_HOST: {"bastion_host": BASTION_HOST}},
+        host_lookup=AWX_BASTION_VARS,
+    )
+    assert awx_get_vars(AWX_HOST, AWX_INVENTORY_FILE) == AWX_BASTION_VARS
+    assert commands[-1] == "ansible-inventory -i {} --host {}".format(
+        AWX_INVENTORY_FILE, AWX_HOST
+    )
+
+
+def test_awx_get_vars_of_an_unknown_host(monkeypatch):
+    fake_awx_inventory(monkeypatch, {AWX_HOST: dict(AWX_BASTION_VARS)})
+    assert awx_get_vars("serv99.example.net", AWX_INVENTORY_FILE) == {}
 
 
 def test_get_bastion_vars():
