@@ -410,25 +410,37 @@ def awx_get_vars(host_ip, inventory_file):
     return get_inv_from_command(command)
 
 
+def source_enabled(name):
+    """Tell whether a source of the bastion vars is enabled
+
+    Every source is read unless its variable disables it, so that a setup
+    knowing where its vars are skips the ones it has no use for.
+
+    :return: source enabled
+    :rtype: bool
+    """
+    return os.environ.get(name, "1").strip().lower() not in ("0", "no", "false", "off")
+
+
 def fill_bastion_vars(hostvar, bastion_host, bastion_port, bastion_user):
     """Fill the bastion vars an earlier source left unset
 
     Each one falls back to the inventory, then to the environment, then to a
     default, so that a var found earlier survives a lookup made for another one.
     """
+    env = os.environ if source_enabled("BASTION_OS_ENV_ENABLED") else {}
+
     if not bastion_host:
         bastion_host = get_var_within(
-            hostvar.get("bastion_host", os.environ.get("BASTION_HOST")), hostvar
+            hostvar.get("bastion_host", env.get("BASTION_HOST")), hostvar
         )
     if not bastion_port:
         bastion_port = get_var_within(
-            hostvar.get("bastion_port", os.environ.get("BASTION_PORT", 22)), hostvar
+            hostvar.get("bastion_port", env.get("BASTION_PORT", 22)), hostvar
         )
     if not bastion_user:
         bastion_user = get_var_within(
-            hostvar.get(
-                "bastion_user", os.environ.get("BASTION_USER", getpass.getuser())
-            ),
+            hostvar.get("bastion_user", env.get("BASTION_USER", getpass.getuser())),
             hostvar,
         )
 

@@ -9,6 +9,7 @@ from lib import (
     find_executable,
     get_hostvars,
     manage_conf_file,
+    source_enabled,
 )
 
 
@@ -53,16 +54,20 @@ def main():
     # Skipping this source of configuration
 
     # Read from configuration file
-    bastion_host, bastion_port, bastion_user = manage_conf_file(
-        os.getenv("BASTION_CONF_FILE", default_configuration_file),
-        bastion_host,
-        bastion_port,
-        bastion_user,
-    )
+    if source_enabled("BASTION_CONF_FILE_ENABLED"):
+        bastion_host, bastion_port, bastion_user = manage_conf_file(
+            os.getenv("BASTION_CONF_FILE", default_configuration_file),
+            bastion_host,
+            bastion_port,
+            bastion_user,
+        )
 
     # Read from inventory and environment variables
     if not bastion_host or not bastion_port or not bastion_user:
-        hostvar = get_hostvars(host)
+        hostvar = {}
+        if source_enabled("BASTION_ANSIBLE_INVENTORY_ENABLED"):
+            hostvar = get_hostvars(host)
+
         bastion_host, bastion_port, bastion_user = fill_bastion_vars(
             hostvar, bastion_host, bastion_port, bastion_user
         )

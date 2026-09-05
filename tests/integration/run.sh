@@ -225,6 +225,30 @@ log "configuration file and inventory sharing the bastion vars"
 BASTION_CONF_FILE="$workdir/bastion-no-user.yml" \
     ANSIBLE_INVENTORY="$workdir/hosts-bastion-user" playbook mixed-sources
 
+# every source but the configuration file is turned off, and the wrapper has to
+# connect on that one alone without reading the others
+log "configuration file as the only source enabled"
+BASTION_CONF_FILE="$workdir/bastion.yml" \
+    BASTION_PLAYBOOK_ENV_ENABLED=0 \
+    BASTION_ANSIBLE_INVENTORY_ENABLED=0 \
+    BASTION_OS_ENV_ENABLED=0 \
+    playbook config-file
+
+# the inventory is the only source holding the bastion vars here, turning it off
+# has to fail rather than read it anyway
+log "inventory source turned off"
+disabled=$(BASTION_CONF_FILE=/nonexistent \
+    ANSIBLE_INVENTORY="$workdir/hosts-bastion" \
+    BASTION_ANSIBLE_INVENTORY_ENABLED=0 playbook inventory 2>&1) || true
+case "$disabled" in
+    *"no bastion host found for this connection"*) ;;
+    *)
+        echo "the wrapper read the inventory although it is turned off:" >&2
+        echo "$disabled" >&2
+        exit 1
+        ;;
+esac
+
 # the inventory of ansible.cfg holds no bastion vars, and neither does any
 # other source, the shape reported in issue #4
 log "no source of the bastion vars"

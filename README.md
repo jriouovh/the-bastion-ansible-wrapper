@@ -122,6 +122,32 @@ Source of variables are read in the following order:
 A source is read only when a variable is still missing, and the first one
 holding it wins.
 
+## Disabling a source
+
+Each source is enabled by default and can be turned off with its own
+environment variable, set to `0`, `no`, `false` or `off`:
+
+| Variable | Source |
+| --- | --- |
+| `BASTION_PLAYBOOK_ENV_ENABLED` | Ansible playbook `environment` |
+| `BASTION_CONF_FILE_ENABLED` | configuration file |
+| `BASTION_ANSIBLE_INVENTORY_ENABLED` | Ansible inventory |
+| `BASTION_OS_ENV_ENABLED` | operating system environment variables |
+
+The wrapper runs once per task and per host, so a source it does not need still
+costs a file read or an `ansible-inventory` run on each of those. A setup
+knowing where its variables are can skip the others:
+
+```bash
+export BASTION_HOST="bastion.example.org"
+export BASTION_ANSIBLE_INVENTORY_ENABLED=0
+export BASTION_CONF_FILE_ENABLED=0
+```
+
+`BASTION_OS_ENV_ENABLED` covers the `BASTION_USER`, `BASTION_HOST` and
+`BASTION_PORT` variables only. The variables of this table are read whatever it
+is set to, and so are `BASTION_CONF_FILE` and the `BASTION_ANSIBLE_INV_*` ones.
+
 ## Using multiple inventories sources
 
 The wrapper is going to lookup the ansible inventory to look for the host and its vars.
@@ -243,7 +269,8 @@ If this doesn't seem to work, run your ansible with `-vvvv`, you'll see whether 
 The wrapper found `bastion_host` in none of the sources listed in
 [Configuration priority](#configuration-priority). Define it as `bastion_host`
 in the Ansible inventory, as `BASTION_HOST` in the environment, or as
-`bastion_host` in the configuration file.
+`bastion_host` in the configuration file, and check that the source you use is
+not turned off, see [Disabling a source](#disabling-a-source).
 
 The most common cause is an inventory passed on the command line with
 `ansible -i my_inventory.yml`: the wrapper is executed by Ansible in place of

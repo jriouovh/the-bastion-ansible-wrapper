@@ -10,6 +10,7 @@ from lib import (
     get_hostvars,
     manage_conf_file,
     parse_bastion_env_vars,
+    source_enabled,
 )
 
 
@@ -55,13 +56,17 @@ def main():
 
     # check if bastion_vars are passed as env vars in the playbook
     # may be usefull if the ansible controller manage many bastions
-    bastion_host, bastion_port, bastion_user = parse_bastion_env_vars(scpcmd)
+    bastion_host = bastion_port = bastion_user = None
+    if source_enabled("BASTION_PLAYBOOK_ENV_ENABLED"):
+        bastion_host, bastion_port, bastion_user = parse_bastion_env_vars(scpcmd)
 
     # the bastion reads the command as a single argument
     scpcmd = scpcmd.replace("#", "##").replace(" ", "#")
 
     # read from configuration file
-    if not bastion_host or not bastion_port or not bastion_user:
+    if (not bastion_host or not bastion_port or not bastion_user) and source_enabled(
+        "BASTION_CONF_FILE_ENABLED"
+    ):
         bastion_host, bastion_port, bastion_user = manage_conf_file(
             os.getenv("BASTION_CONF_FILE", default_configuration_file),
             bastion_host,
@@ -72,7 +77,9 @@ def main():
     # lookup on the inventory may take some time, depending on the source, so use it only if not defined elsewhere
     # it seems like some module like template does not send env vars too...
     if not bastion_host or not bastion_port or not bastion_user:
-        hostvar = get_hostvars(host)  # dict
+        hostvar = {}
+        if source_enabled("BASTION_ANSIBLE_INVENTORY_ENABLED"):
+            hostvar = get_hostvars(host)  # dict
 
         bastion_host, bastion_port, bastion_user = fill_bastion_vars(
             hostvar, bastion_host, bastion_port, bastion_user

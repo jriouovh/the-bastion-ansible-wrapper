@@ -14,6 +14,7 @@ from lib import (
     manage_conf_file,
     parse_bastion_env_vars,
     parse_ssh_argv,
+    source_enabled,
 )
 
 
@@ -45,12 +46,16 @@ def main():
     #     BASTION_USER: "{{ bastion_user }}"
     #     BASTION_HOST: "{{ bastion_host }}"
     #     BASTION_PORT: "{{ bastion_port }}"
-    bastion_host, bastion_port, bastion_user = parse_bastion_env_vars(cmd)
+    bastion_host = bastion_port = bastion_user = None
+    if source_enabled("BASTION_PLAYBOOK_ENV_ENABLED"):
+        bastion_host, bastion_port, bastion_user = parse_bastion_env_vars(cmd)
 
     # in some cases (AWX in a non containerised environment for instance), the environment is overridden by the job
     # so we are not able to get the BASTION vars
     # if some vars are still undefined, try to load them from a configuration file
-    if not bastion_host or not bastion_port or not bastion_user:
+    if (not bastion_host or not bastion_port or not bastion_user) and source_enabled(
+        "BASTION_CONF_FILE_ENABLED"
+    ):
         bastion_host, bastion_port, bastion_user = manage_conf_file(
             os.environ.get("BASTION_CONF_FILE", default_configuration_file),
             bastion_host,
@@ -61,12 +66,15 @@ def main():
     # lookup on the inventory may take some time, depending on the source, so use it only if not defined elsewhere
     # it seems like some module like template does not send env vars too...
     if not bastion_host or not bastion_port or not bastion_user:
-        # check if running on AWX, we'll get the vars in a different way
-        awx_inventory_file = awx_get_inventory_file()
-        if os.path.exists(awx_inventory_file):
-            hostvar = awx_get_vars(host, awx_inventory_file)
-        else:
-            hostvar = get_hostvars(host)  # dict
+        hostvar = {}
+
+        if source_enabled("BASTION_ANSIBLE_INVENTORY_ENABLED"):
+            # check if running on AWX, we'll get the vars in a different way
+            awx_inventory_file = awx_get_inventory_file()
+            if os.path.exists(awx_inventory_file):
+                hostvar = awx_get_vars(host, awx_inventory_file)
+            else:
+                hostvar = get_hostvars(host)  # dict
 
         bastion_host, bastion_port, bastion_user = fill_bastion_vars(
             hostvar, bastion_host, bastion_port, bastion_user

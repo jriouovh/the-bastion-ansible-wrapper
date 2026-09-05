@@ -19,6 +19,7 @@ from lib import (
     manage_conf_file,
     parse_bastion_env_vars,
     parse_ssh_argv,
+    source_enabled,
 )
 
 BASTION_HOST = "my_bastion"
@@ -777,3 +778,114 @@ def test_sshwrapper_lists_the_inventory_once_for_a_missing_var(monkeypatch):
     )
     assert len(lookups["inventory"]) == 1
     assert len(lookups["conf_file"]) == 1
+
+
+def test_source_enabled_by_default(monkeypatch):
+    monkeypatch.delenv("BASTION_TEST_SOURCE_ENABLED", raising=False)
+    assert source_enabled("BASTION_TEST_SOURCE_ENABLED")
+
+
+@pytest.mark.parametrize("value", ["1", "yes", "true", "on", "anything"])
+def test_source_enabled_values(monkeypatch, value):
+    monkeypatch.setenv("BASTION_TEST_SOURCE_ENABLED", value)
+    assert source_enabled("BASTION_TEST_SOURCE_ENABLED")
+
+
+@pytest.mark.parametrize("value", ["0", "no", "false", "off", "FALSE", " 0 "])
+def test_source_disabled_values(monkeypatch, value):
+    monkeypatch.setenv("BASTION_TEST_SOURCE_ENABLED", value)
+    assert not source_enabled("BASTION_TEST_SOURCE_ENABLED")
+
+
+def test_sshwrapper_playbook_env_source_disabled(monkeypatch):
+    lookups = count_lookups(monkeypatch)
+    monkeypatch.setenv("BASTION_PLAYBOOK_ENV_ENABLED", "0")
+    monkeypatch.setenv("BASTION_ANSIBLE_INVENTORY_ENABLED", "0")
+    monkeypatch.delenv("BASTION_HOST", raising=False)
+    with pytest.raises(SystemExit):
+        exec_wrapper(sshwrapper, SSH_ARGS + [AWX_COMMAND])
+    assert lookups["inventory"] == []
+
+
+def test_scpwrapper_playbook_env_source_disabled(monkeypatch):
+    lookups = count_lookups(monkeypatch)
+    monkeypatch.setenv("BASTION_PLAYBOOK_ENV_ENABLED", "0")
+    monkeypatch.setenv("BASTION_ANSIBLE_INVENTORY_ENABLED", "0")
+    monkeypatch.delenv("BASTION_HOST", raising=False)
+    command = "scp -t BASTION_HOST={}".format(BASTION_HOST)
+    with pytest.raises(SystemExit):
+        exec_wrapper(scpwrapper, SCP_ARGS[:-1] + [command])
+    assert lookups["inventory"] == []
+
+
+def test_sshwrapper_conf_file_source_disabled(monkeypatch):
+    lookups = count_lookups(monkeypatch)
+    monkeypatch.setenv("BASTION_CONF_FILE_ENABLED", "0")
+    monkeypatch.setenv("BASTION_ANSIBLE_INVENTORY_ENABLED", "0")
+    monkeypatch.delenv("BASTION_HOST", raising=False)
+    with pytest.raises(SystemExit):
+        exec_wrapper(
+            sshwrapper, SSH_ARGS + ["/bin/sh -c true"], conf_file=BASTION_CONF_FILE
+        )
+    assert lookups["conf_file"] == []
+
+
+def test_sftpwrapper_conf_file_source_disabled(monkeypatch):
+    lookups = count_lookups(monkeypatch)
+    monkeypatch.setenv("BASTION_CONF_FILE_ENABLED", "0")
+    monkeypatch.setenv("BASTION_ANSIBLE_INVENTORY_ENABLED", "0")
+    monkeypatch.delenv("BASTION_HOST", raising=False)
+    with pytest.raises(SystemExit):
+        exec_wrapper(sftpwrapper, SFTP_ARGS, conf_file=BASTION_CONF_FILE)
+    assert lookups["conf_file"] == []
+
+
+def test_sshwrapper_inventory_source_disabled(monkeypatch):
+    lookups = count_lookups(monkeypatch)
+    monkeypatch.setenv("BASTION_ANSIBLE_INVENTORY_ENABLED", "0")
+    monkeypatch.setenv("BASTION_HOST", BASTION_HOST)
+    args = exec_wrapper(sshwrapper, SSH_ARGS + ["/bin/sh -c true"])
+    assert lookups["inventory"] == []
+    assert BASTION_HOST in args
+
+
+def test_scpwrapper_inventory_source_disabled(monkeypatch):
+    lookups = count_lookups(monkeypatch)
+    monkeypatch.setenv("BASTION_ANSIBLE_INVENTORY_ENABLED", "0")
+    monkeypatch.setenv("BASTION_HOST", BASTION_HOST)
+    args = exec_wrapper(scpwrapper, SCP_ARGS)
+    assert lookups["inventory"] == []
+    assert args[1].endswith("@{}".format(BASTION_HOST))
+
+
+def test_sftpwrapper_inventory_source_disabled(monkeypatch):
+    lookups = count_lookups(monkeypatch)
+    monkeypatch.setenv("BASTION_ANSIBLE_INVENTORY_ENABLED", "0")
+    monkeypatch.setenv("BASTION_HOST", BASTION_HOST)
+    args = exec_wrapper(sftpwrapper, SFTP_ARGS)
+    assert lookups["inventory"] == []
+    assert args[1].endswith("@{}".format(BASTION_HOST))
+
+
+def test_os_env_source_disabled(monkeypatch):
+    monkeypatch.setenv("BASTION_OS_ENV_ENABLED", "0")
+    monkeypatch.setenv("BASTION_HOST", BASTION_HOST)
+    monkeypatch.setenv("BASTION_PORT", "2222")
+    monkeypatch.setenv("BASTION_USER", "from_env")
+    bastion_host, bastion_port, bastion_user = fill_bastion_vars({}, None, None, None)
+    assert bastion_host is None
+    assert bastion_port == 22
+    assert bastion_user != "from_env"
+
+
+def test_os_env_source_enabled_by_default(monkeypatch):
+    monkeypatch.delenv("BASTION_OS_ENV_ENABLED", raising=False)
+    monkeypatch.setenv("BASTION_HOST", BASTION_HOST)
+    monkeypatch.setenv("BASTION_PORT", "2222")
+    monkeypatch.setenv("BASTION_USER", "from_env")
+    bastion_host, bastion_port, bastion_user = fill_bastion_vars({}, None, None, None)
+    assert (bastion_host, bastion_port, bastion_user) == (
+        BASTION_HOST,
+        "2222",
+        "from_env",
+    )
