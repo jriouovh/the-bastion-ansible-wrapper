@@ -19,6 +19,7 @@ from lib import (
     has_remote_command,
     manage_conf_file,
     parse_bastion_env_vars,
+    parse_bastion_ssh_options,
     parse_ssh_argv,
     source_enabled,
 )
@@ -940,4 +941,184 @@ def test_os_env_source_enabled_by_default(monkeypatch):
         BASTION_HOST,
         "2222",
         "from_env",
+    )
+
+
+def test_parse_bastion_ssh_options():
+    bastion_host, bastion_port, bastion_user, remaining = parse_bastion_ssh_options(
+        [
+            "-o",
+            "BastionHost={}".format(BASTION_HOST),
+            "-o",
+            "BastionPort={}".format(BASTION_PORT),
+            "-o",
+            "BastionUser={}".format(BASTION_USER),
+        ]
+    )
+    assert bastion_host == BASTION_HOST
+    assert bastion_port == str(BASTION_PORT)
+    assert bastion_user == BASTION_USER
+    assert remaining == []
+
+
+def test_parse_bastion_ssh_options_keeps_the_other_options_in_order():
+    _, _, _, remaining = parse_bastion_ssh_options(
+        [
+            "-C",
+            "-o",
+            "ControlMaster=auto",
+            "-o",
+            "BastionHost={}".format(BASTION_HOST),
+            "-o",
+            "User=deploy",
+            "127.0.0.1",
+        ]
+    )
+    assert remaining == [
+        "-C",
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "User=deploy",
+        "127.0.0.1",
+    ]
+
+
+def test_parse_bastion_ssh_options_attached_to_the_flag():
+    bastion_host, _, _, remaining = parse_bastion_ssh_options(
+        ["-oBastionHost={}".format(BASTION_HOST)]
+    )
+    assert bastion_host == BASTION_HOST
+    assert remaining == []
+
+
+def test_parse_bastion_ssh_options_separated_by_a_space():
+    # the shape sftp and scp give their own options, ex "-oForwardX11 no"
+    bastion_host, _, _, remaining = parse_bastion_ssh_options(
+        ["-oBastionHost {}".format(BASTION_HOST)]
+    )
+    assert bastion_host == BASTION_HOST
+    assert remaining == []
+
+
+def test_parse_bastion_ssh_options_name_is_case_insensitive():
+    bastion_host, _, _, _ = parse_bastion_ssh_options(
+        ["-o", "bastionhost={}".format(BASTION_HOST)]
+    )
+    assert bastion_host == BASTION_HOST
+
+
+def test_parse_bastion_ssh_options_empty_value_is_still_consumed():
+    bastion_host, _, _, remaining = parse_bastion_ssh_options(["-o", "BastionHost="])
+    assert not bastion_host
+    assert remaining == []
+
+
+def test_parse_bastion_ssh_options_value_with_equal_sign():
+    bastion_host, _, _, _ = parse_bastion_ssh_options(["-o", "BastionHost=host=1"])
+    assert bastion_host == "host=1"
+
+
+def test_parse_bastion_ssh_options_first_one_wins():
+    bastion_host, _, _, _ = parse_bastion_ssh_options(
+        ["-o", "BastionHost=first", "-o", "BastionHost=second"]
+    )
+    assert bastion_host == "first"
+
+
+def test_parse_bastion_ssh_options_trailing_flag_without_value():
+    bastion_host, _, _, remaining = parse_bastion_ssh_options(["127.0.0.1", "-o"])
+    assert not bastion_host
+    assert remaining == ["127.0.0.1", "-o"]
+
+
+def test_parse_bastion_ssh_options_ignores_a_name_ending_with_a_bastion_one():
+    bastion_host, _, _, remaining = parse_bastion_ssh_options(
+        ["-o", "NotABastionHost=evil"]
+    )
+    assert not bastion_host
+    assert remaining == ["-o", "NotABastionHost=evil"]
+
+
+def test_parse_bastion_ssh_options_no_option():
+    bastion_host, bastion_port, bastion_user, remaining = parse_bastion_ssh_options(
+        ["127.0.0.1"]
+    )
+    assert not bastion_host
+    assert not bastion_port
+    assert not bastion_user
+    assert remaining == ["127.0.0.1"]
+
+
+BASTION_SSH_OPTIONS = [
+    "-o",
+    "BastionHost={}".format(BASTION_HOST),
+    "-o",
+    "BastionPort={}".format(BASTION_PORT),
+    "-o",
+    "BastionUser={}".format(BASTION_USER),
+]
+
+
+def test_sshwrapper_bastion_vars_from_ssh_options(monkeypatch):
+    lookups = count_lookups(monkeypatch)
+    args = exec_wrapper(
+        sshwrapper, BASTION_SSH_OPTIONS + SSH_ARGS + ["/bin/sh -c '/bin/true'"]
+    )
+    assert lookups["inventory"] == []
+    assert args[:9] == [
+        "ssh",
+        "-p",
+        str(BASTION_PORT),
+        "-q",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-l",
+        BASTION_USER,
+        BASTION_HOST,
+    ]
+    assert "BastionHost={}".format(BASTION_HOST) not in args
+
+
+def test_sftpwrapper_bastion_vars_from_ssh_options(monkeypatch):
+    lookups = count_lookups(monkeypatch)
+    args = exec_wrapper(sftpwrapper, BASTION_SSH_OPTIONS + SFTP_ARGS)
+    assert lookups["inventory"] == []
+    assert args[1] == "{}@{}".format(BASTION_USER, BASTION_HOST)
+    assert args[3] == str(BASTION_PORT)
+    assert "BastionHost={}".format(BASTION_HOST) not in args
+
+
+def test_scpwrapper_bastion_vars_from_ssh_options(monkeypatch):
+    lookups = count_lookups(monkeypatch)
+    args = exec_wrapper(scpwrapper, BASTION_SSH_OPTIONS + SCP_ARGS)
+    assert lookups["inventory"] == []
+    assert args[1] == "{}@{}".format(BASTION_USER, BASTION_HOST)
+    assert args[3] == str(BASTION_PORT)
+    assert "BastionHost={}".format(BASTION_HOST) not in args
+
+
+def test_ssh_options_win_over_the_configuration_file():
+    args = exec_wrapper(
+        sftpwrapper,
+        ["-o", "BastionHost=from_the_options"] + SFTP_ARGS,
+        conf_file=BASTION_CONF_FILE,
+    )
+    assert args[1].endswith("@from_the_options")
+
+
+def test_ssh_options_source_disabled_still_consumes_them(monkeypatch):
+    monkeypatch.setenv("BASTION_SSH_OPTIONS_ENABLED", "0")
+    monkeypatch.setenv("BASTION_HOST", BASTION_HOST)
+    monkeypatch.setenv("BASTION_ANSIBLE_INVENTORY_ENABLED", "0")
+    args = exec_wrapper(sftpwrapper, ["-o", "BastionHost=ignored"] + SFTP_ARGS)
+    assert args[1].endswith("@{}".format(BASTION_HOST))
+    assert "BastionHost=ignored" not in args
+
+
+def test_sshwrapper_control_master_operation_drops_the_bastion_options():
+    argv = ["-o", "ControlPath=/tmp/cp", "-O", "stop", "127.0.0.1"]
+    assert (
+        exec_wrapper(sshwrapper, ["-o", "BastionHost={}".format(BASTION_HOST)] + argv)
+        == ["ssh"] + argv
     )

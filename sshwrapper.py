@@ -13,6 +13,7 @@ from lib import (
     has_remote_command,
     manage_conf_file,
     parse_bastion_env_vars,
+    parse_bastion_ssh_options,
     parse_ssh_argv,
     source_enabled,
 )
@@ -28,6 +29,12 @@ def main():
     ssh = find_executable("ssh")
     if not ssh:
         sys.exit("bastion wrapper: no ssh executable found in PATH")
+
+    # ansible renders `ansible_ssh_common_args` from the hostvars of the moment,
+    # a set_fact included, and appends it to every wrapper it runs
+    bastion_host, bastion_port, bastion_user, argv = parse_bastion_ssh_options(argv)
+    if not source_enabled("BASTION_SSH_OPTIONS_ENABLED"):
+        bastion_host = bastion_port = bastion_user = None
 
     # nothing to proxy, hand the arguments over to ssh untouched
     if not has_remote_command(argv):
@@ -46,9 +53,13 @@ def main():
     #     BASTION_USER: "{{ bastion_user }}"
     #     BASTION_HOST: "{{ bastion_host }}"
     #     BASTION_PORT: "{{ bastion_port }}"
-    bastion_host = bastion_port = bastion_user = None
-    if source_enabled("BASTION_PLAYBOOK_ENV_ENABLED"):
-        bastion_host, bastion_port, bastion_user = parse_bastion_env_vars(cmd)
+    if (not bastion_host or not bastion_port or not bastion_user) and source_enabled(
+        "BASTION_PLAYBOOK_ENV_ENABLED"
+    ):
+        env_host, env_port, env_user = parse_bastion_env_vars(cmd)
+        bastion_host = bastion_host or env_host
+        bastion_port = bastion_port or env_port
+        bastion_user = bastion_user or env_user
 
     # in some cases (AWX in a non containerised environment for instance), the environment is overridden by the job
     # so we are not able to get the BASTION vars

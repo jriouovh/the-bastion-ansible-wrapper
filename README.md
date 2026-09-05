@@ -87,6 +87,44 @@ here, each host may have its bastion_X vars defined in group_vars and host_vars.
 
 If environement vars are not defined, or if the module does not send them, then the sshwrapper is doing a lookup on the ansible-inventory to fetch the bastion_X vars.
 
+## Using vars known at runtime
+
+A playbook `environment` block reaches the ssh wrapper only, and only for the
+command a module runs: ansible inlines it in that command, and it has nowhere to
+go when there is no command. An SFTP transfer asks for a subsystem, an SCP
+transfer runs a command the local `scp` binary writes, and ansible creates the
+temporary directory a module is copied into with a command of its own. None of
+those carry the block, so a variable known only at runtime cannot be read from
+there.
+
+`ansible_ssh_common_args` is rendered from the host variables of the moment and
+appended to the command line of all three wrappers, which makes it the one
+channel reaching every hop:
+
+```yaml
+---
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: read the bastion of this host from wherever it lives
+      set_fact:
+        bastion_host: "{{ netbox_device.custom_fields.bastion }}"
+
+    - name: hand the bastion vars over to the wrappers
+      set_fact:
+        ansible_ssh_common_args: >-
+          -o BastionUser={{ bastion_user }}
+          -o BastionHost={{ bastion_host }}
+          -o BastionPort={{ bastion_port }}
+```
+
+It is a host variable like any other, so an inventory, a `group_vars` file or a
+`vars_files` entry can define it just as well.
+
+The wrappers read these three options and drop them from the command line they
+hand over, as ssh knows no option by those names. Every other option is
+forwarded untouched.
+
 ## Using vars from a config file
 
 For some use cases (AWX in a non containerised environment for instance), the environment is overridden by the job, and there is no fixed inventory source path.
@@ -114,6 +152,7 @@ environment variable (defaults to `/etc/ovh/bastion/config.yml`).
 ## Configuration priority
 
 Source of variables are read in the following order:
+* `BastionUser`, `BastionHost` and `BastionPort` ssh options
 * Ansible playbook `environment`
 * configuration file
 * Ansible inventory
@@ -129,6 +168,7 @@ environment variable, set to `0`, `no`, `false` or `off`:
 
 | Variable | Source |
 | --- | --- |
+| `BASTION_SSH_OPTIONS_ENABLED` | `Bastion*` ssh options |
 | `BASTION_PLAYBOOK_ENV_ENABLED` | Ansible playbook `environment` |
 | `BASTION_CONF_FILE_ENABLED` | configuration file |
 | `BASTION_ANSIBLE_INVENTORY_ENABLED` | Ansible inventory |
@@ -143,6 +183,9 @@ export BASTION_HOST="bastion.example.org"
 export BASTION_ANSIBLE_INVENTORY_ENABLED=0
 export BASTION_CONF_FILE_ENABLED=0
 ```
+
+The `Bastion*` ssh options are dropped from the command line whatever
+`BASTION_SSH_OPTIONS_ENABLED` is set to, as ssh would reject them.
 
 `BASTION_OS_ENV_ENABLED` covers the `BASTION_USER`, `BASTION_HOST` and
 `BASTION_PORT` variables only. The variables of this table are read whatever it

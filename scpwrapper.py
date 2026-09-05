@@ -10,6 +10,7 @@ from lib import (
     get_hostvars,
     manage_conf_file,
     parse_bastion_env_vars,
+    parse_bastion_ssh_options,
     source_enabled,
 )
 
@@ -24,6 +25,12 @@ def main():
     ssh = find_executable("ssh")
     if not ssh:
         sys.exit("bastion wrapper: no ssh executable found in PATH")
+
+    # ansible renders `ansible_ssh_common_args` from the hostvars of the moment,
+    # a set_fact included, and appends it to every wrapper it runs
+    bastion_host, bastion_port, bastion_user, argv = parse_bastion_ssh_options(argv)
+    if not source_enabled("BASTION_SSH_OPTIONS_ENABLED"):
+        bastion_host = bastion_port = bastion_user = None
 
     iteration = enumerate(argv)
     sshcmdline = []
@@ -56,9 +63,13 @@ def main():
 
     # check if bastion_vars are passed as env vars in the playbook
     # may be usefull if the ansible controller manage many bastions
-    bastion_host = bastion_port = bastion_user = None
-    if source_enabled("BASTION_PLAYBOOK_ENV_ENABLED"):
-        bastion_host, bastion_port, bastion_user = parse_bastion_env_vars(scpcmd)
+    if (not bastion_host or not bastion_port or not bastion_user) and source_enabled(
+        "BASTION_PLAYBOOK_ENV_ENABLED"
+    ):
+        env_host, env_port, env_user = parse_bastion_env_vars(scpcmd)
+        bastion_host = bastion_host or env_host
+        bastion_port = bastion_port or env_port
+        bastion_user = bastion_user or env_user
 
     # the bastion reads the command as a single argument
     scpcmd = scpcmd.replace("#", "##").replace(" ", "#")

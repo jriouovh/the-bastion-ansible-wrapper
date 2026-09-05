@@ -20,6 +20,14 @@ SSH_LOCAL_OPTIONS = "GOQV"
 
 BASTION_VAR_NAMES = ("bastion_host", "bastion_port", "bastion_user")
 
+# the ssh options carrying the bastion vars, keyed by their lowercase name
+# as ssh(1) reads an option name whatever its case
+BASTION_SSH_OPTIONS = {
+    "bastionhost": "bastion_host",
+    "bastionport": "bastion_port",
+    "bastionuser": "bastion_user",
+}
+
 SHELL_SEPARATORS = ("&&", "||", ";", "|", "&")
 
 # the flags a shell takes its command from, ex `/bin/sh -c '<command>'`
@@ -285,6 +293,82 @@ def parse_bastion_env_vars(command):
         bastion_vars["bastion_host"],
         bastion_vars["bastion_port"],
         bastion_vars["bastion_user"],
+    )
+
+
+def read_bastion_option(option):
+    """Read the bastion var an ssh option holds
+
+    ssh(1) separates an option from its value with an equal sign or a space,
+    and sftp and scp use the second form for the options they add themselves.
+
+    :return: the bastion var name and its value, or None
+    :rtype: tuple
+    """
+    name, separator, value = option.partition("=")
+    if not separator:
+        name, separator, value = option.partition(" ")
+    if not separator:
+        return None
+
+    bastion_var = BASTION_SSH_OPTIONS.get(name.strip().lower())
+    if not bastion_var:
+        return None
+
+    return bastion_var, value.strip()
+
+
+def parse_bastion_ssh_options(argv):
+    """Fetch the bastion vars from the ssh options and drop them from the arguments
+
+    `ansible_ssh_common_args` is rendered from the hostvars of the moment, a
+    `set_fact` included, and ansible appends it to the command line of all three
+    wrappers, ex:
+        ansible_ssh_common_args: -o BastionHost={{ bastion_host }}
+    which is the only channel an sftp subsystem invocation carries, as it holds
+    no command for an `environment` block to be inlined into.
+
+    ssh knows no such option and would reject it, so it never reaches the
+    bastion. An option without a value is dropped all the same, letting the
+    other sources of the bastion vars answer, and the first one wins.
+
+    :return: bastion_host, bastion_port, bastion_user, the remaining arguments
+    :rtype: tuple
+    """
+    bastion_vars = dict.fromkeys(BASTION_VAR_NAMES)
+    remaining = []
+    reading_value = False
+
+    for token in argv:
+        option = None
+        if reading_value:
+            reading_value = False
+            option = read_bastion_option(token)
+            if not option:
+                remaining.extend(["-o", token])
+        elif token == "-o":
+            reading_value = True
+            continue
+        elif token.startswith("-o") and len(token) > 2:
+            option = read_bastion_option(token[2:])
+            if not option:
+                remaining.append(token)
+        else:
+            remaining.append(token)
+
+        if option:
+            name, value = option
+            if value and not bastion_vars[name]:
+                bastion_vars[name] = value
+
+    if reading_value:
+        remaining.append("-o")
+
+    return (
+        bastion_vars["bastion_host"],
+        bastion_vars["bastion_port"],
+        bastion_vars["bastion_user"],
+        remaining,
     )
 
 

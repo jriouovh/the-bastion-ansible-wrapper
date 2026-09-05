@@ -299,6 +299,60 @@ log "sftp wrapper without a shared control master"
         -e fetch_dir="$workdir/fetch-sftp-no-master"
 )
 
+# the bastion vars exist nowhere the wrapper can look them up, they are computed
+# by the play and handed over as ssh options, which is the only channel reaching
+# an sftp subsystem invocation and ansible's own temporary directory command.
+# Every hop runs on its own, so the transfer wrapper has to resolve the bastion
+# rather than ride the master the ssh wrapper opened. Issue #30.
+for method in sftp scp; do
+    log "$method transfer, bastion vars computed at runtime and passed as ssh options"
+    (
+        export ANSIBLE_SSH_ARGS="-C -o UserKnownHostsFile=/dev/null"
+        BASTION_CONF_FILE=/nonexistent ANSIBLE_SSH_TRANSFER_METHOD="$method" \
+            playbook ssh-options -e transfer="$method" \
+            -e seed_user="$account" -e seed_host=127.0.0.1 \
+            -e seed_port="$bastion_port" \
+            -e fetch_dir="$workdir/fetch-ssh-options-$method"
+    )
+done
+
+# ansible sends no `environment` block with the command creating the temporary
+# directory a module is copied into, so the ssh options are the only source
+# answering that hop, which pipelining otherwise skips
+log "bastion vars as ssh options, without pipelining"
+(
+    export ANSIBLE_SSH_ARGS="-C -o UserKnownHostsFile=/dev/null"
+    export ANSIBLE_PIPELINING=False
+    BASTION_CONF_FILE=/nonexistent ANSIBLE_SSH_TRANSFER_METHOD=sftp \
+        playbook ssh-options -e transfer=no-pipelining \
+        -e seed_user="$account" -e seed_host=127.0.0.1 \
+        -e seed_port="$bastion_port" \
+        -e fetch_dir="$workdir/fetch-ssh-options-no-pipelining"
+)
+
+# the ssh options are the only source holding the bastion vars here, turning
+# them off has to fail rather than read them anyway, and the options still have
+# to be dropped rather than handed over to an ssh that knows no such name
+log "ssh options source turned off"
+disabled=$(BASTION_CONF_FILE=/nonexistent BASTION_SSH_OPTIONS_ENABLED=0 \
+    playbook ssh-options -e transfer=disabled \
+    -e seed_user="$account" -e seed_host=127.0.0.1 \
+    -e seed_port="$bastion_port" \
+    -e fetch_dir="$workdir/fetch-ssh-options-disabled" 2>&1) || true
+case "$disabled" in
+    *"Bad configuration option"*)
+        echo "the wrapper handed its own ssh options over to ssh:" >&2
+        echo "$disabled" | grep "Bad configuration option" >&2
+        exit 1
+        ;;
+    *"no bastion host found for this connection"*) ;;
+    *)
+        echo "the wrapper read the ssh options although they are turned off:" >&2
+        echo "$disabled" >&2
+        exit 1
+        ;;
+esac
+
 # ansible tries sftp, then scp, then a piped dd when the transfer method is
 # left at its default, and warns on each one it falls back from rather than
 # failing the play. A broken transfer path is invisible here, every task only

@@ -9,6 +9,7 @@ from lib import (
     find_executable,
     get_hostvars,
     manage_conf_file,
+    parse_bastion_ssh_options,
     source_enabled,
 )
 
@@ -16,9 +17,6 @@ from lib import (
 def main():
     argv = list(sys.argv[1:])
 
-    bastion_user = None
-    bastion_host = None
-    bastion_port = None
     remote_user = None
     remote_port = 22
     default_configuration_file = "/etc/ovh/bastion/config.yml"
@@ -29,6 +27,15 @@ def main():
 
     if len(argv) < 2:
         sys.exit("bastion wrapper: no host to proxy")
+
+    # sftp asks for a subsystem and sends no command, so a playbook `environment`
+    # block has nothing to be inlined into and never reaches here. Ansible
+    # renders `ansible_ssh_common_args` from the hostvars of the moment, a
+    # set_fact included, and appends it to the command line below, which is the
+    # only channel left for a var known at runtime only.
+    bastion_host, bastion_port, bastion_user, argv = parse_bastion_ssh_options(argv)
+    if not source_enabled("BASTION_SSH_OPTIONS_ENABLED"):
+        bastion_host = bastion_port = bastion_user = None
 
     # sftp ends its arguments with the host and the subsystem it asks for
     host = argv[-2]
@@ -50,11 +57,10 @@ def main():
         else:
             sshcmdline.append(e)
 
-    # Playbook environment variables are not pushed to the sftp wrapper
-    # Skipping this source of configuration
-
     # Read from configuration file
-    if source_enabled("BASTION_CONF_FILE_ENABLED"):
+    if (not bastion_host or not bastion_port or not bastion_user) and source_enabled(
+        "BASTION_CONF_FILE_ENABLED"
+    ):
         bastion_host, bastion_port, bastion_user = manage_conf_file(
             os.getenv("BASTION_CONF_FILE", default_configuration_file),
             bastion_host,
