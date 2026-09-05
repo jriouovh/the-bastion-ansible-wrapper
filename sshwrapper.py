@@ -10,22 +10,31 @@ from lib import (
     find_executable,
     get_hostvars,
     get_var_within,
+    has_remote_command,
     manage_conf_file,
+    parse_bastion_env_vars,
+    parse_ssh_argv,
 )
 
 
 def main():
     argv = list(sys.argv[1:])  # Copy
 
-    bastion_user = None
-    bastion_host = None
-    bastion_port = None
     remote_user = None
     remote_port = 22
     default_configuration_file = "/etc/ovh/bastion/config.yml"
 
-    cmd = argv.pop()
-    host = argv.pop()
+    ssh = find_executable("ssh")
+    if not ssh:
+        sys.exit("bastion wrapper: no ssh executable found in PATH")
+
+    # nothing to proxy, hand the arguments over to ssh untouched
+    if not has_remote_command(argv):
+        os.execv(ssh, ["ssh"] + argv)
+
+    options, _, remaining = parse_ssh_argv(argv)
+    host = remaining[0]
+    cmd = " ".join(remaining[1:])
 
     # check if bastion_vars are passed as env vars in the playbook
     # may be usefull if the ansible controller manage many bastions
@@ -36,15 +45,7 @@ def main():
     #     BASTION_USER: "{{ bastion_user }}"
     #     BASTION_HOST: "{{ bastion_host }}"
     #     BASTION_PORT: "{{ bastion_port }}"
-    #
-    # will result as : ... '/bin/sh -c '"'"'BASTION_USER=my_bastion_user BASTION_HOST=my_bastion_host BASTION_PORT=22 /usr/bin/python3 && sleep 0'"'"''
-    for i in list(cmd.split(" ")):
-        if "bastion_user" in i.lower():
-            bastion_user = i.split("=")[1]
-        elif "bastion_host" in i.lower():
-            bastion_host = i.split("=")[1]
-        elif "bastion_port" in i.lower():
-            bastion_port = i.split("=")[1]
+    bastion_host, bastion_port, bastion_user = parse_bastion_env_vars(cmd)
 
     # in some cases (AWX in a non containerised environment for instance), the environment is overridden by the job
     # so we are not able to get the BASTION vars
@@ -83,14 +84,14 @@ def main():
             hostvar.get("bastion_host", os.environ.get("BASTION_HOST")), hostvar
         )
 
-    for i, e in enumerate(argv):
+    for i, e in enumerate(options):
 
         if e.startswith("User="):
             remote_user = e.split("=")[-1]
-            argv[i] = "User={}".format(bastion_user)
+            options[i] = "User={}".format(bastion_user)
         elif e.startswith("Port="):
             remote_port = e.split("=")[-1]
-            argv[i] = "Port={}".format(bastion_port)
+            options[i] = "Port={}".format(bastion_port)
 
     # syscall exec
     args = (
@@ -106,7 +107,7 @@ def main():
             bastion_host,
             "-T",
         ]
-        + argv
+        + options
         + [
             "--",
             "-q",
@@ -122,7 +123,7 @@ def main():
         ]
     )
     os.execv(
-        find_executable("ssh"),  # full path mandatory
+        ssh,
         [str(e).strip() for e in args],  # execv() arg 2 must contain only strings
     )
 

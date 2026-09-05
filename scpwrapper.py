@@ -4,33 +4,41 @@ import getpass
 import os
 import sys
 
-from lib import find_executable, get_hostvars, manage_conf_file
+from lib import (
+    find_executable,
+    get_hostvars,
+    manage_conf_file,
+    parse_bastion_env_vars,
+)
 
 
 def main():
     argv = list(sys.argv[1:])  # Copy
 
-    bastion_user = None
-    bastion_host = None
-    bastion_port = None
     remote_user = None
     remote_port = 22
     default_configuration_file = "/etc/ovh/bastion/config.yml"
 
+    ssh = find_executable("ssh")
+    if not ssh:
+        sys.exit("bastion wrapper: no ssh executable found in PATH")
+
     iteration = enumerate(argv)
     sshcmdline = []
     for i, e in iteration:
-        if e == "-l":
-            remote_user = argv[i + 1]
+        # a trailing option has no value, and reading one raises
+        value = argv[i + 1] if i + 1 < len(argv) else ""
+        if e == "-l" and value:
+            remote_user = value
             next(iteration)
-        elif e == "-p":
-            remote_port = argv[i + 1]
+        elif e == "-p" and value:
+            remote_port = value
             next(iteration)
-        elif e == "-o" and argv[i + 1].startswith("User="):
-            remote_user = argv[i + 1].split("=")[-1]
+        elif e == "-o" and value.startswith("User="):
+            remote_user = value.split("=")[-1]
             next(iteration)
-        elif e == "-o" and argv[i + 1].startswith("Port="):
-            remote_port = argv[i + 1].split("=")[-1]
+        elif e == "-o" and value.startswith("Port="):
+            remote_port = value.split("=")[-1]
             next(iteration)
         elif e == "--":
             sshcmdline.extend(argv[i + 1 :])
@@ -38,19 +46,18 @@ def main():
         else:
             sshcmdline.append(e)
 
+    if len(sshcmdline) < 2:
+        sys.exit("bastion wrapper: no host and scp command to proxy")
+
     scpcmd = sshcmdline.pop()
     host = sshcmdline.pop()
-    scpcmd = scpcmd.replace("#", "##").replace(" ", "#")
 
     # check if bastion_vars are passed as env vars in the playbook
     # may be usefull if the ansible controller manage many bastions
-    for i in list(scpcmd.split(" ")):
-        if "bastion_user" in i.lower():
-            bastion_user = i.split("=")[1]
-        elif "bastion_host" in i.lower():
-            bastion_host = i.split("=")[1]
-        elif "bastion_port" in i.lower():
-            bastion_port = i.split("=")[1]
+    bastion_host, bastion_port, bastion_user = parse_bastion_env_vars(scpcmd)
+
+    # the bastion reads the command as a single argument
+    scpcmd = scpcmd.replace("#", "##").replace(" ", "#")
 
     # read from configuration file
     if not bastion_host or not bastion_port or not bastion_user:
@@ -100,7 +107,7 @@ def main():
     )
 
     os.execv(
-        find_executable("ssh"),  # absolute path mandatory
+        ssh,
         [str(e).strip() for e in args],  # execv() arg 2 must contain only strings
     )
 

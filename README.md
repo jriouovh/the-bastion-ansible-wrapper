@@ -11,7 +11,8 @@ allow to use different bastion for different hosts.
 
 ## Simple usage with environment variables
 
-Ensure the scripts are executable (`chmod +x`)
+Ensure the scripts are executable (`chmod +x`) and install their
+dependencies (`pip install -r requirements.txt`)
 
 ```bash
 export BASTION_USER="bastion_user"
@@ -103,7 +104,7 @@ bastion_user: "my_bastion_user"
 
 The configuration file is read after checking the environment variables sent in the ssh command line, and will only set them if not defined.
 
-The location of the configuration file can be set with `BASTION_CONFIG_FILE`
+The location of the configuration file can be set with `BASTION_CONF_FILE`
 environment variable (defaults to `/etc/ovh/bastion/config.yml`).
 
 ## Configuration priority
@@ -213,11 +214,18 @@ git submodule add https://github.com/ovh/the-bastion-ansible-wrapper.git extra/b
 
 ## Requirements
 
+The wrappers need the python dependencies listed in `requirements.txt`:
+
+```bash
+pip install -r requirements.txt
+```
+
 This has been tested with
 
-* Ansible 2.9.6
-* Python 3.7.3
-* SSH OpenSSH_7.9p1 Debian-10+deb10u2, OpenSSL 1.1.1d
+* Debian 12 and Debian 13, the supported Debian releases
+* Python 3.11 and 3.13, the versions those releases ship
+* ansible-core 2.19
+* OpenSSH 9.2
 
 ## Debug
 

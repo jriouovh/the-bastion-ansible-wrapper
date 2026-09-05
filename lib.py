@@ -1,10 +1,32 @@
 import json
 import logging
 import os
+import re
+import shlex
+import shutil
 import subprocess
 import time
 
 from yaml import YAMLError, safe_load
+
+# ssh(1) options taking a value, which the next argument holds when it is not
+# attached to the option itself
+SSH_OPTIONS_WITH_VALUE = "BbcDEeFIiJLlmOopQRSWw"
+
+# ssh(1) options making it work locally and exit, without opening a connection
+SSH_LOCAL_OPTIONS = "GOQV"
+
+BASTION_VAR_NAMES = ("bastion_host", "bastion_port", "bastion_user")
+
+SHELL_SEPARATORS = ("&&", "||", ";", "|", "&")
+
+# the flags a shell takes its command from, ex `/bin/sh -c '<command>'`
+SHELL_COMMAND_FLAGS = ("-c", "-lc")
+
+SHELL_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
+
+# `/bin/sh -c '/bin/sh -c "..."'` is as deep as ansible nests its commands
+MAX_COMMAND_DEPTH = 3
 
 
 def find_executable(executable, path=None):
@@ -13,18 +35,7 @@ def find_executable(executable, path=None):
     :return: path
     :rtype: str
     """
-    _, ext = os.path.splitext(executable)
-
-    if os.path.isfile(executable):
-        return executable
-
-    if path is None:
-        path = os.environ.get("PATH", os.defpath)
-
-    for p in path.split(os.pathsep):
-        f = os.path.join(p, executable)
-        if os.path.isfile(f):
-            return f
+    return shutil.which(executable, path=path)
 
 
 def get_inventory():
@@ -117,6 +128,136 @@ def get_hostvars(host) -> dict:
             return hostvars
     # Host not found
     return {}
+
+
+def parse_ssh_argv(argv):
+    """Split ssh arguments into the options and what follows them
+
+    An option value can look like anything, a hostname included, so the option
+    arity is the only way to tell `ssh -o User=deploy 1.2.3.4` (a host, no
+    command) from `ssh -W 1.2.3.4 bastion` (a bastion, no host).
+
+    :return: the options, the option letters they hold, the host and command
+    :rtype: tuple
+    """
+    options = []
+    letters_given = set()
+    remaining = list(argv)
+
+    while remaining:
+        token = remaining[0]
+        if len(token) < 2 or not token.startswith("-"):
+            break
+
+        options.append(remaining.pop(0))
+        if token == "--":
+            break
+
+        letters = token[1:]
+        while letters:
+            letter, letters = letters[0], letters[1:]
+            letters_given.add(letter)
+            if letter in SSH_OPTIONS_WITH_VALUE:
+                # the value is the rest of the token, or the next argument
+                if not letters and remaining:
+                    options.append(remaining.pop(0))
+                break
+
+    return options, letters_given, remaining
+
+
+def has_remote_command(argv):
+    """Tell if the ssh arguments hold a host and a command to proxy
+
+    Ansible also runs the ssh executable for operations that stay local, like
+    closing a ControlPersist socket with `ssh -O stop <host>` or probing the
+    version with `ssh -V`. Popping a host and a command out of those crashes
+    the wrapper, and ansible reports the failure as an unreachable host with an
+    empty message.
+
+    :return: whether the connection can be proxied through the bastion
+    :rtype: bool
+    """
+    _, letters_given, remaining = parse_ssh_argv(argv)
+
+    if letters_given.intersection(SSH_LOCAL_OPTIONS):
+        return False
+
+    return len(remaining) >= 2
+
+
+def split_command(command):
+    """Split a command the way a shell would
+
+    :return: tokens
+    :rtype: list
+    """
+    try:
+        return shlex.split(command)
+    except ValueError:
+        # an unbalanced quote, ex a command holding a lone apostrophe
+        return command.split(" ")
+
+
+def iter_shell_assignments(command, depth=0):
+    """Yield the key and value of every assignment prefixing a command
+
+    A shell reads `VAR=value` as an assignment only where a command can start,
+    and ansible nests commands, ex:
+        /bin/sh -c 'BASTION_HOST=host /usr/bin/python3 && sleep 0'
+    so what a shell takes as a command is parsed as one rather than flattened
+    with the command running it.
+
+    :return: key, value
+    :rtype: tuple
+    """
+    at_command_start = True
+    previous = ""
+
+    for token in split_command(command):
+        # the fallback split keeps the quotes shlex would have consumed
+        unquoted = token.lstrip("\"'")
+        at_command_start = at_command_start or unquoted != token
+
+        assignment = SHELL_ASSIGNMENT.match(unquoted)
+        if at_command_start and assignment:
+            yield assignment.group(1), assignment.group(2).strip("\"'")
+            continue
+
+        if previous in SHELL_COMMAND_FLAGS and depth < MAX_COMMAND_DEPTH:
+            yield from iter_shell_assignments(token, depth + 1)
+
+        at_command_start = unquoted in SHELL_SEPARATORS
+        previous = unquoted
+
+
+def parse_bastion_env_vars(command):
+    """Fetch the bastion vars from the command ansible runs on the host
+
+    The `environment` block of a playbook is inlined in the remote command, ex:
+        /bin/sh -c 'BASTION_USER=user BASTION_HOST=host BASTION_PORT=22 /usr/bin/python3'
+
+    Only an exact variable name matches, and only where a shell would read an
+    assignment, so neither `NO_BASTION_HOST=1` nor the `bastion_host=x` a `raw`
+    task happens to echo is read as a bastion var. An assignment without a
+    value is skipped, letting the other sources of the bastion vars answer, and
+    the first assignment wins, like in the environment the command ends up with.
+
+    :return: bastion_host, bastion_port, bastion_user
+    :rtype: tuple
+    """
+    bastion_vars = dict.fromkeys(BASTION_VAR_NAMES)
+
+    for key, value in iter_shell_assignments(command):
+        name = key.lower()
+        if name in bastion_vars and value and not bastion_vars[name]:
+            bastion_vars[name] = value
+
+    return (
+        bastion_vars["bastion_host"],
+        bastion_vars["bastion_port"],
+        bastion_vars["bastion_user"],
+    )
 
 
 def manage_conf_file(conf_file, bastion_host, bastion_port, bastion_user):

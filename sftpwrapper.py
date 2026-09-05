@@ -17,17 +17,32 @@ def main():
     remote_port = 22
     default_configuration_file = "/etc/ovh/bastion/config.yml"
 
-    iteration = enumerate(argv)
-    for i, e in iteration:
-        if e == "-o" and argv[i + 1].startswith("User="):
-            remote_user = argv[i + 1].split("=")[-1]
-            next(iteration)
-        elif e == "-o" and argv[i + 1].startswith("Port="):
-            remote_port = argv[i + 1].split("=")[-1]
-            next(iteration)
+    ssh = find_executable("ssh")
+    if not ssh:
+        sys.exit("bastion wrapper: no ssh executable found in PATH")
 
-    sftpcmd = argv.pop()
-    host = argv.pop()
+    if len(argv) < 2:
+        sys.exit("bastion wrapper: no host to proxy")
+
+    # sftp ends its arguments with the host and the subsystem it asks for
+    host = argv[-2]
+
+    iteration = enumerate(argv)
+    sshcmdline = []
+    for i, e in iteration:
+        # a trailing option has no value, and reading one raises
+        value = argv[i + 1] if i + 1 < len(argv) else ""
+        if e == "-o" and value.startswith("User="):
+            remote_user = value.split("=")[-1]
+            next(iteration)
+        elif e == "-o" and value.startswith("Port="):
+            remote_port = value.split("=")[-1]
+            next(iteration)
+        elif e in ("-s", "--"):
+            # osh is a command, not an ssh subsystem
+            break
+        else:
+            sshcmdline.append(e)
 
     # Playbook environment variables are not pushed to the sftp wrapper
     # Skipping this source of configuration
@@ -49,27 +64,34 @@ def main():
         )
         bastion_host = inventory.get("bastion_host", os.getenv("BASTION_HOST"))
 
-    args = [
-        "ssh",
-        "{}@{}".format(bastion_user, bastion_host),
-        "-p",
-        bastion_port,
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-T",
-        "--",
-        "--user",
-        remote_user,
-        "--port",
-        remote_port,
-        "--host",
-        host,
-        "--osh",
-        "sftp",
-    ]
+    # ansible passes the identity file and its ssh options to sftp, which hands
+    # them over here, and the bastion connection needs them
+    args = (
+        [
+            "ssh",
+            "{}@{}".format(bastion_user, bastion_host),
+            "-p",
+            bastion_port,
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-T",
+        ]
+        + sshcmdline
+        + [
+            "--",
+            "--user",
+            remote_user,
+            "--port",
+            remote_port,
+            "--host",
+            host,
+            "--osh",
+            "sftp",
+        ]
+    )
 
     os.execv(
-        find_executable("ssh"),
+        ssh,
         [str(e).strip() for e in args],
     )
 
