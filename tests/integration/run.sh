@@ -299,4 +299,26 @@ log "sftp wrapper without a shared control master"
         -e fetch_dir="$workdir/fetch-sftp-no-master"
 )
 
+# ansible tries sftp, then scp, then a piped dd when the transfer method is
+# left at its default, and warns on each one it falls back from rather than
+# failing the play. A broken transfer path is invisible here, every task only
+# carries a warning and the files travel over the piped dd, the shape reported
+# in issue #21. Forcing a method above turns that warning into an error, so
+# this is the only scenario that can see it.
+log "default transfer method, no mechanism falling back"
+smart=$(BASTION_CONF_FILE="$workdir/bastion.yml" \
+    playbook transfer -e transfer=smart \
+    -e fetch_dir="$workdir/fetch-smart" 2>&1) || {
+    echo "the default transfer method failed the play:" >&2
+    echo "$smart" >&2
+    exit 1
+}
+case "$smart" in
+    *"transfer mechanism failed"*)
+        echo "a transfer mechanism fell back to the next one:" >&2
+        echo "$smart" | grep "transfer mechanism failed" >&2
+        exit 1
+        ;;
+esac
+
 log "all integration tests passed"
