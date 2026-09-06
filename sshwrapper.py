@@ -42,6 +42,10 @@ def main():
 
     options, _, remaining = parse_ssh_argv(argv)
     host = remaining[0]
+    # ssh joins the arguments following the host with a space and sends that
+    # string, quoting none of them, so a connection plugin handing over several
+    # quotes them itself: mitogen shlex-quotes every element of its boot
+    # command. Quoting them here again would reach python as its own quotes.
     cmd = " ".join(remaining[1:])
 
     # check if bastion_vars are passed as env vars in the playbook
@@ -93,6 +97,9 @@ def main():
 
     check_bastion_host(bastion_host)
 
+    # a connection plugin names the remote user and port with either form,
+    # and the bastion is what the connection actually opens, so its own answer
+    # replaces them wherever they are found
     for i, e in enumerate(options):
 
         if e.startswith("User="):
@@ -101,6 +108,17 @@ def main():
         elif e.startswith("Port="):
             remote_port = e.split("=")[-1]
             options[i] = "Port={}".format(bastion_port)
+        elif e == "-l" and i + 1 < len(options):
+            remote_user = options[i + 1]
+            options[i + 1] = str(bastion_user)
+        elif e == "-p" and i + 1 < len(options):
+            remote_port = options[i + 1]
+            options[i + 1] = str(bastion_port)
+
+    # a connection plugin naming no remote user leaves the bastion to pick its
+    # own default, which passing the word None would take away from it
+    remote = ["--user", remote_user] if remote_user else []
+    remote += ["--port", remote_port]
 
     # syscall exec
     args = (
@@ -117,15 +135,9 @@ def main():
             "-T",
         ]
         + options
+        + ["--", "-q", "-T", "--never-escape"]
+        + remote
         + [
-            "--",
-            "-q",
-            "-T",
-            "--never-escape",
-            "--user",
-            remote_user,
-            "--port",
-            remote_port,
             host,
             "--",
             cmd,

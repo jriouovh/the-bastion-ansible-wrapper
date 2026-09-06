@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -1305,3 +1306,77 @@ def test_get_hostvars_host_lookup_miss_stays_quiet(monkeypatch, capsys):
     monkeypatch.delenv("BASTION_ANSIBLE_INV_OPTIONS", raising=False)
     assert lib.get_hostvars_of_one_host("nope") == {}
     assert capsys.readouterr().err == ""
+
+
+# What mitogen's first stage looks like once mitogen/ssh.py has built it:
+# python, -c, the source, the compressed preamble, the remote name and the
+# preamble length, each one an argv element of its own and each one already
+# shlex-quoted by mitogen.
+MITOGEN_SOURCE = "import sys;print(' '.join(sys.argv[1:]))"
+
+MITOGEN_CMD_PARTS = [
+    "/usr/bin/python3",
+    "-c",
+    shlex.quote(MITOGEN_SOURCE),
+    "H4sIAAA",
+    "ansible-controller",
+    "31337",
+]
+
+MITOGEN_ARGS = [
+    "-o",
+    "LogLevel ERROR",
+    "-l",
+    "deploy",
+    "-p",
+    "2222",
+    "-C",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "127.0.0.1",
+] + MITOGEN_CMD_PARTS
+
+
+def test_sshwrapper_hands_a_mitogen_command_over_as_mitogen_built_it():
+    args = exec_wrapper(sshwrapper, MITOGEN_ARGS, conf_file=BASTION_CONF_FILE)
+    assert args[-1] == " ".join(MITOGEN_CMD_PARTS)
+
+
+def test_sshwrapper_mitogen_command_reaches_python_whole():
+    """Quoting the elements again hands python its own quotes as the source"""
+    args = exec_wrapper(sshwrapper, MITOGEN_ARGS, conf_file=BASTION_CONF_FILE)
+    ran = subprocess.run(["/bin/sh", "-c", args[-1]], capture_output=True, text=True)
+    assert ran.returncode == 0
+    assert ran.stdout == "H4sIAAA ansible-controller 31337\n"
+
+
+def test_sshwrapper_keeps_a_stock_command_as_it_is():
+    command = "/bin/sh -c 'echo a && echo b'"
+    args = exec_wrapper(sshwrapper, SSH_ARGS + [command], conf_file=BASTION_CONF_FILE)
+    assert args[-1] == command
+
+
+def test_sshwrapper_rewrites_the_short_user_and_port_flags():
+    """The bastion is what the connection opens, so it answers for -l and -p"""
+    args = exec_wrapper(sshwrapper, MITOGEN_ARGS, conf_file=BASTION_CONF_FILE)
+    assert args[10:19] == [
+        "-o",
+        "LogLevel ERROR",
+        "-l",
+        BASTION_USER,
+        "-p",
+        str(BASTION_PORT),
+        "-C",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+    ]
+    assert args[args.index("--user") + 1] == "deploy"
+    assert args[args.index("--port") + 1] == "2222"
+
+
+def test_sshwrapper_without_a_remote_user_lets_the_bastion_pick_one():
+    """The word None would take the bastion's own default away from it"""
+    argv = ["-C", "127.0.0.1"] + MITOGEN_CMD_PARTS
+    args = exec_wrapper(sshwrapper, argv, conf_file=BASTION_CONF_FILE)
+    assert "None" not in args
+    assert "--user" not in args

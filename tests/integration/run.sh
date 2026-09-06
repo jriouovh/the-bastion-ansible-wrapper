@@ -375,4 +375,31 @@ case "$smart" in
         ;;
 esac
 
+# The stock ssh connection plugin hands the wrapper one already quoted command,
+# which is the only shape every scenario above produces. Mitogen builds its own
+# ssh command line, and its first stage arrives as several argv elements: a
+# wrapper joining them on a space hands the target a command its shell re-splits
+# on the python source, and the play dies on a syntax error. The raw module is
+# the other shape the stock path never produces.
+log "mitogen strategy and the raw module"
+mitogen_strategy=$(python3 -c 'import ansible_mitogen, os
+print(os.path.join(os.path.dirname(ansible_mitogen.__file__), "plugins", "strategy"))') || {
+    echo "mitogen is not installed, so this scenario would silently test the" >&2
+    echo "stock ssh path instead: pip install -r tests/integration/requirements.txt" >&2
+    exit 1
+}
+
+# ansible refuses to run at all on a strategy it cannot load, so a play that
+# reaches its first task is a play mitogen is driving
+mitogen_run=$(BASTION_CONF_FILE="$workdir/bastion.yml" \
+    ANSIBLE_STRATEGY_PLUGINS="$mitogen_strategy" \
+    ANSIBLE_STRATEGY=mitogen_linear \
+    playbook mitogen \
+    -e target_user="$remote_user" \
+    -e ansible_python_interpreter=/usr/bin/python3 2>&1) || {
+    echo "the mitogen scenario failed the play:" >&2
+    echo "$mitogen_run" >&2
+    exit 1
+}
+
 log "all integration tests passed"

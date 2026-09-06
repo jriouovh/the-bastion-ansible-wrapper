@@ -244,6 +244,28 @@ ssh_executable = ./extra/bastion/sshwrapper.py
 Or by using the `ANSIBLE_SSH_PIPELINING` and `ANSIBLE_SSH_EXECUTABLE`
 environment variables.
 
+## Connection via Mitogen
+
+[Mitogen](https://mitogen.networkgenomics.com/ansible_detailed.html) replaces
+Ansible's connection plugin with one of its own. It reads the same
+`ssh_executable`, so the wrapper needs no configuration beyond the one above:
+
+```ini
+[defaults]
+strategy_plugins = <path to ansible_mitogen>/plugins/strategy
+strategy = mitogen_linear
+
+[ssh_connection]
+ssh_executable = ./extra/bastion/sshwrapper.py
+```
+
+Mitogen builds its own `ssh` command line rather than reusing Ansible's, which
+differs in two ways the wrapper accounts for. It names the remote user and port
+with the short `-l` and `-p` flags rather than with `-o User=` and `-o Port=`,
+and it hands the remote command over as several arguments rather than as one,
+each already quoted for the shell that will run it. The wrapper joins them with
+a space and quotes none of them, which is what `ssh` itself does.
+
 ## File transfer using SFTP
 
 By default, Ansible uses SFTP to copy files. The executable should be defined
